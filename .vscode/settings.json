@@ -1,0 +1,8 @@
+{
+    "idf.portWin": "COM5",
+    "idf.openOcdConfigs": [
+        "board/esp32p4-ftdi.cfg"
+    ],
+    "idf.flashType": "UART",
+    "C_Cpp.errorSquiggles": "enabled"
+}
