@@ -1,46 +1,54 @@
-// ============================================================
-// menu.h
-// ============================================================
-#ifndef MENU_H
-#define MENU_H
+#pragma once
 
 #include "lvgl.h"
+#include "image_loader.h"
 
-// Colour palette options
-#define PALETTE_SIZE 6
-static const lv_color_t colour_palette[PALETTE_SIZE] = {
-    LV_COLOR_MAKE(255, 255, 255),  // White
-    LV_COLOR_MAKE(255, 50,  50),   // Red
-    LV_COLOR_MAKE(50,  150, 255),  // Blue
-    LV_COLOR_MAKE(50,  255, 100),  // Green
-    LV_COLOR_MAKE(255, 200, 0),    // Amber
-    LV_COLOR_MAKE(200, 50,  255),  // Purple
-};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-// Image variants per element — point these at your actual image sources
-extern const lv_image_dsc_t needle_v1, needle_v2, needle_v3;
-extern const lv_image_dsc_t face_v1,   face_v2,   face_v3;
-
+// ── Predefined colour presets ──────────────────────────────────────────────
 typedef struct {
-    const lv_image_dsc_t *src;
-    const char           *label;
-} ImageOption;
+    const char  *name;          // display name, e.g. "Amber"
+    lv_color_t   face_tint;     // recolour applied to face layer
+    lv_opa_t     face_tint_opa;
+    lv_color_t   mid_tint;      // recolour applied to mid layer
+    lv_opa_t     mid_tint_opa;
+} ThemeColor;
 
-static const ImageOption needle_options[] = {
-    { &needle_v1, "Needle 1" },
-    { &needle_v2, "Needle 2" },
-    { &needle_v3, "Needle 3" },
-};
+// ── Gauge-face descriptors ─────────────────────────────────────────────────
+typedef struct {
+    const char *name;           // display name, e.g. "Tabby"
+    const char *face_bin;       // SD path  "S:themes/tabby/face.bin"
+    const char *mid_bin;
+    const char *needle_bin;
+} GaugeFace;
 
-static const ImageOption face_options[] = {
-    { &face_v1, "Face 1" },
-    { &face_v2, "Face 2" },
-    { &face_v3, "Face 3" },
-};
+// ── Menu callbacks (implement in main.c) ───────────────────────────────────
+/**
+ * Called when the user confirms a new face + colour selection.
+ * The menu is already dismissed before this fires; redraw the dash here.
+ */
+typedef void (*menu_apply_cb_t)(const GaugeFace *face, const ThemeColor *color);
 
-#define NEEDLE_OPTION_COUNT 3
-#define FACE_OPTION_COUNT   3
+// ── Public API ─────────────────────────────────────────────────────────────
 
-void menu_init(lv_obj_t *needle_img, lv_obj_t *face_img, lv_anim_exec_xcb_t angle_cb);
+/**
+ * One-time init.  Call after bsp_display_start_with_config().
+ * @param apply_cb  Your function that reloads images and calls FlattenStaticLayers().
+ */
+void menu_init(menu_apply_cb_t apply_cb);
 
+/**
+ * Show the overlay from anywhere (e.g. a long-press handler on the dash screen).
+ */
+void menu_show(void);
+
+/**
+ * Hide/destroy the overlay without applying changes.
+ */
+void menu_hide(void);
+
+#ifdef __cplusplus
+}
 #endif

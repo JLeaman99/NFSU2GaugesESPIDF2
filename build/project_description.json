@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "NFSU2GaugesESPIDF2",
-    "project_version":    "85657b2-dirty",
+    "project_version":    "f79bc06-dirty",
     "project_path":       "C:/Users/jared/source/repos/NFSU2GaugesESPIDF2",
     "idf_path":           "C:/Users/jared/esp/v5.5.1/esp-idf",
     "build_dir":          "C:/Users/jared/source/repos/NFSU2GaugesESPIDF2/build",

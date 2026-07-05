@@ -1,295 +1,392 @@
-// ============================================================
-// menu.c
-// ============================================================
+/**
+ * menu.c – Two-step overlay menu for the ESP32-P4 instrument cluster.
+ *
+ * Step 1: Pick a gauge face  (horizontal swipe carousel)
+ * Step 2: Pick a colour      (grid of colour swatches)
+ *
+ * A single "Accept" button commits the selection and fires menu_apply_cb_t.
+ * A "Back" button goes from step 2 → step 1.
+ * Tapping outside the panel (or the X) dismisses without changes.
+ *
+ * All LVGL calls must be made while the display lock is held; the caller is
+ * responsible for that (DrawDash already wraps in bsp_display_lock).
+ */
+
 #include "menu.h"
-#include "lvgl.h"
+#include "esp_log.h"
+#include <string.h>
 
-// ---- Internal state ----------------------------------------
-typedef enum { ELEMENT_NEEDLE, ELEMENT_FACE } SelectedElement;
+#define TAG "MENU"
 
-static struct {
-    lv_obj_t *needle_img;
-    lv_obj_t *face_img;
-    lv_anim_t *needle_anim;
+// ── Catalogue ─────────────────────────────────────────────────────────────
 
-    // Menu panels (created/deleted on open/close)
-    lv_obj_t *overlay;
-    lv_obj_t *panel;
+static const GaugeFace FACES[] = {
+    { "Tabby",   "S:themes/tabby/face.bin",   "S:themes/tabby/mid.bin",   "S:themes/tabby/needle.bin"   },
+    { "Circuit", "S:themes/circuit/face.bin", "S:themes/circuit/mid.bin", "S:themes/circuit/needle.bin" },
+    { "Minimal", "S:themes/minimal/face.bin", "S:themes/minimal/mid.bin", "S:themes/minimal/needle.bin" },
+};
+#define FACE_COUNT (sizeof(FACES) / sizeof(FACES[0]))
 
-    // Pending selections (applied only on confirm)
-    SelectedElement  active_element;
-    const lv_image_dsc_t *pending_img_src;
-    lv_color_t       pending_colour;
-    bool             colour_selected;
-    lv_anim_exec_xcb_t angle_cb;   // ← add this
+static const ThemeColor COLORS[] = {
+    { "Amber",   {}, LV_OPA_50, {}, LV_OPA_50 },   // filled below in menu_init
+    { "Ice",     {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Rose",    {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Lime",    {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Cobalt",  {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Mono",    {}, LV_OPA_30, {}, LV_OPA_30 },
+};
+#define COLOR_COUNT (sizeof(COLORS) / sizeof(COLORS[0]))
 
-} menu;
+// Raw hex values kept separately so the struct can have lv_color_t later
+static const uint32_t COLOR_FACE_HEX[]  = { 0xC8C566, 0x66C8C5, 0xFF0064, 0x66FF44, 0x4488FF, 0xCECECE };
+static const uint32_t COLOR_MID_HEX[]   = { 0xFF0064, 0x0064FF, 0xFF6600, 0xFF0064, 0xFF0099, 0xCECECE };
 
-// ---- Forward declarations ----------------------------------
-static void open_menu(lv_event_t *e);
-static void close_menu(void);
-static void build_element_page(void);
-static void build_image_page(void);
-static void build_colour_page(void);
-static void on_element_selected(lv_event_t *e);
-static void on_image_selected(lv_event_t *e);
-static void on_colour_selected(lv_event_t *e);
-static void on_confirm(lv_event_t *e);
-static void on_back(lv_event_t *e);
-static void apply_selections(void);
-static lv_obj_t *create_panel(void);
-static lv_obj_t *add_back_button(lv_obj_t *parent);
+// ── Internal state ─────────────────────────────────────────────────────────
 
-// ---- Helpers -----------------------------------------------
+static menu_apply_cb_t s_apply_cb  = NULL;
+static lv_obj_t       *s_overlay   = NULL;   // full-screen dim container
+static lv_obj_t       *s_panel     = NULL;   // the white card
 
-// Pause animation by setting speed to 0
-static void pause_animation(void) {
-    lv_anim_del(menu.needle_img, NULL);
+static int s_sel_face  = 0;   // currently highlighted face index
+static int s_sel_color = 0;   // currently highlighted color index
+static int s_step      = 1;   // 1 = face picker, 2 = color picker
+
+// Per-step content containers (swapped in/out)
+static lv_obj_t *s_step1_cont = NULL;
+static lv_obj_t *s_step2_cont = NULL;
+static lv_obj_t *s_accept_btn = NULL;
+static lv_obj_t *s_back_btn   = NULL;
+
+// Keep references to face + color buttons so we can highlight the selection
+static lv_obj_t *s_face_btns [FACE_COUNT];
+static lv_obj_t *s_color_btns[COLOR_COUNT];
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+#define PANEL_W   680
+#define PANEL_H   520
+#define RADIUS    18
+
+#define COL_BG        lv_color_make(0x18, 0x18, 0x18)  // near-black panel bg
+#define COL_CARD      lv_color_make(0x26, 0x26, 0x26)  // face card bg
+#define COL_ACCENT    lv_color_make(0xC8, 0xC5, 0x66)  // amber selection ring
+#define COL_BTN       lv_color_make(0x38, 0x38, 0x38)
+#define COL_BTN_ACT   lv_color_make(0xC8, 0xC5, 0x66)
+#define COL_TEXT      lv_color_make(0xFF, 0xFF, 0xFF)
+#define COL_SUBTEXT   lv_color_make(0x88, 0x88, 0x88)
+#define COL_DIM       lv_color_make(0x00, 0x00, 0x00)
+
+static void style_btn(lv_obj_t *btn, bool active)
+{
+    lv_obj_set_style_bg_color(btn, active ? COL_BTN_ACT : COL_BTN, 0);
+    lv_obj_set_style_border_color(btn, active ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+    lv_obj_set_style_border_width(btn, active ? 3 : 1, 0);
+    lv_obj_set_style_radius(btn, 10, 0);
 }
 
-// Restart the needle animation
-static void resume_animation(void) {
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, menu.needle_img);
-    lv_anim_set_exec_cb(&anim, menu.angle_cb);
-    lv_anim_set_values(&anim, 0, 2400);
-    lv_anim_set_duration(&anim, 5000);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&anim);
+// ── Face card ─────────────────────────────────────────────────────────────
+
+static void face_btn_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_sel_face = idx;
+
+    // Refresh all face-button highlight states
+    for (int i = 0; i < (int)FACE_COUNT; i++) {
+        style_btn(s_face_btns[i], i == s_sel_face);
+    }
 }
 
-// Semi-transparent dark overlay behind the panel
-static lv_obj_t *create_overlay(void) {
-    lv_obj_t *overlay = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(overlay, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_50, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
-    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
-    return overlay;
-}
+static lv_obj_t *build_step1(lv_obj_t *parent)
+{
+    lv_obj_t *cont = lv_obj_create(parent);
+    lv_obj_set_size(cont, PANEL_W - 40, 340);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0);
+    lv_obj_set_scroll_dir(cont, LV_DIR_NONE);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 60);
 
-// Centred floating panel
-static lv_obj_t *create_panel(void) {
-    lv_obj_t *panel = lv_obj_create(menu.overlay);
-    lv_obj_set_size(panel, 400, 450);
-    lv_obj_center(panel);
-    lv_obj_set_style_bg_color(panel, lv_color_make(30, 30, 30), 0);
-    lv_obj_set_style_border_color(panel, lv_color_make(80, 80, 80), 0);
-    lv_obj_set_style_border_width(panel, 1, 0);
-    lv_obj_set_style_radius(panel, 12, 0);
-    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(panel, 16, 0);
-    lv_obj_set_style_pad_gap(panel, 12, 0);
-    return panel;
-}
+    // Horizontal flex row of face cards
+    lv_obj_set_layout(cont, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(cont, 16, 0);
 
-// Back button row
-static lv_obj_t *add_back_button(lv_obj_t *parent) {
-    lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_width(btn, LV_PCT(100));
-    lv_obj_set_style_bg_color(btn, lv_color_make(60, 60, 60), 0);
-    lv_obj_t *label = lv_label_create(btn);
-    lv_label_set_text(label, LV_SYMBOL_LEFT " Back");
-    lv_obj_center(label);
-    lv_obj_add_event_cb(btn, on_back, LV_EVENT_CLICKED, NULL);
-    return btn;
-}
+    int card_w = (PANEL_W - 40 - (int)(FACE_COUNT - 1) * 16) / (int)FACE_COUNT;
+    card_w = card_w > 180 ? 180 : card_w;
 
-// ---- Page builders -----------------------------------------
+    for (int i = 0; i < (int)FACE_COUNT; i++) {
+        lv_obj_t *card = lv_obj_create(cont);
+        lv_obj_set_size(card, card_w, 200);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        lv_obj_set_scroll_dir(card, LV_DIR_NONE);
+        style_btn(card, i == s_sel_face);
+        lv_obj_set_style_bg_color(card, COL_CARD, 0);
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(card, face_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
-// Page 1: Choose which element to customise
-static void build_element_page(void) {
-    lv_obj_clean(menu.panel);
+        // Gauge name label
+        lv_obj_t *name = lv_label_create(card);
+        lv_label_set_text(name, FACES[i].name);
+        lv_obj_set_style_text_color(name, COL_TEXT, 0);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_20, 0);
+        lv_obj_align(name, LV_ALIGN_CENTER, 0, 0);
 
-    lv_obj_t *title = lv_label_create(menu.panel);
-    lv_label_set_text(title, "Customise");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-
-    const char *labels[] = { "Needle", "Gauge Face" };
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t *btn = lv_button_create(menu.panel);
-        lv_obj_set_width(btn, LV_PCT(100));
-        lv_obj_set_style_bg_color(btn, lv_color_make(50, 50, 80), 0);
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, labels[i]);
-        lv_obj_center(lbl);
-        lv_obj_add_event_cb(btn, on_element_selected, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        s_face_btns[i] = card;
     }
 
-    // Close button
-    lv_obj_t *close_btn = lv_button_create(menu.panel);
-    lv_obj_set_width(close_btn, LV_PCT(100));
-    lv_obj_set_style_bg_color(close_btn, lv_color_make(80, 30, 30), 0);
+    // Step label
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, "SELECT GAUGE FACE");
+    lv_obj_set_style_text_color(lbl, COL_SUBTEXT, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 20);
+
+    return cont;
+}
+
+// ── Colour swatch ─────────────────────────────────────────────────────────
+
+static void color_btn_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_sel_color = idx;
+
+    for (int i = 0; i < (int)COLOR_COUNT; i++) {
+        // Keep the swatch's actual colour; just vary the border
+        lv_obj_set_style_border_color(s_color_btns[i],
+            i == s_sel_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+        lv_obj_set_style_border_width(s_color_btns[i], i == s_sel_color ? 4 : 1, 0);
+    }
+}
+
+static lv_obj_t *build_step2(lv_obj_t *parent)
+{
+    lv_obj_t *cont = lv_obj_create(parent);
+    lv_obj_set_size(cont, PANEL_W - 40, 340);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0);
+    lv_obj_set_scroll_dir(cont, LV_DIR_NONE);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 60);
+
+    // 3-column flex grid
+    lv_obj_set_layout(cont, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(cont, 14, 0);
+
+    for (int i = 0; i < (int)COLOR_COUNT; i++) {
+        lv_obj_t *swatch = lv_obj_create(cont);
+        lv_obj_set_size(swatch, 160, 120);
+        lv_obj_set_scroll_dir(swatch, LV_DIR_NONE);
+        lv_obj_set_style_radius(swatch, 12, 0);
+        lv_obj_set_style_bg_color(swatch, lv_color_hex(COLOR_FACE_HEX[i]), 0);
+        lv_obj_set_style_border_color(swatch,
+            i == s_sel_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+        lv_obj_set_style_border_width(swatch, i == s_sel_color ? 4 : 1, 0);
+        lv_obj_add_flag(swatch, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(swatch, color_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        // Colour name label
+        lv_obj_t *name = lv_label_create(swatch);
+        lv_label_set_text(name, COLORS[i].name);
+        lv_obj_set_style_text_color(name, COL_TEXT, 0);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_16, 0);
+        lv_obj_align(name, LV_ALIGN_BOTTOM_MID, 0, -8);
+
+        s_color_btns[i] = swatch;
+    }
+
+    // Step label
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, "SELECT COLOUR");
+    lv_obj_set_style_text_color(lbl, COL_SUBTEXT, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 20);
+
+    return cont;
+}
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+
+static void go_step2(void)
+{
+    s_step = 2;
+    lv_obj_add_flag(s_step1_cont, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_step2_cont, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_back_btn,  LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(lv_obj_get_child(s_accept_btn, 0), "APPLY");
+}
+
+static void go_step1(void)
+{
+    s_step = 1;
+    lv_obj_clear_flag(s_step1_cont, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step2_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_back_btn,    LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(lv_obj_get_child(s_accept_btn, 0), "NEXT");
+}
+
+// ── Button callbacks ───────────────────────────────────────────────────────
+
+static void accept_cb(lv_event_t *e)
+{
+    if (s_step == 1) {
+        go_step2();
+        return;
+    }
+
+    // Step 2: commit
+    menu_hide();
+
+    if (s_apply_cb) {
+        s_apply_cb(&FACES[s_sel_face], &COLORS[s_sel_color]);
+    }
+}
+
+static void back_cb(lv_event_t *e)
+{
+    go_step1();
+}
+
+static void dismiss_cb(lv_event_t *e)
+{
+    // Only dismiss when clicking the dim overlay itself, not bubbled events
+    if (lv_event_get_target(e) == s_overlay) {
+        menu_hide();
+    }
+}
+
+static void close_btn_cb(lv_event_t *e)
+{
+    menu_hide();
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+void menu_init(menu_apply_cb_t apply_cb)
+{
+    s_apply_cb = apply_cb;
+
+    // Populate lv_color_t fields from the hex arrays
+    for (int i = 0; i < (int)COLOR_COUNT; i++) {
+        // Cast away const – we own the array, it is static storage not ROM
+        ThemeColor *c = (ThemeColor *)&COLORS[i];
+        c->face_tint = lv_color_hex(COLOR_FACE_HEX[i]);
+        c->mid_tint  = lv_color_hex(COLOR_MID_HEX[i]);
+    }
+
+    ESP_LOGI(TAG, "menu_init: %d faces, %d colours", (int)FACE_COUNT, (int)COLOR_COUNT);
+}
+
+static void panel_click_absorb_cb(lv_event_t *e)
+{
+    // Absorb the click so it does not bubble up to the dim overlay dismiss handler
+    (void)e;
+}
+
+void menu_show(void)
+{
+    if (s_overlay != NULL) return;   // already open
+
+    // ── Dim overlay (full-screen, semi-transparent) ──────────────────────
+    s_overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_overlay, COL_DIM, 0);
+    lv_obj_set_style_bg_opa(s_overlay, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_overlay, 0, 0);
+    lv_obj_set_style_radius(s_overlay, 0, 0);
+    lv_obj_set_style_pad_all(s_overlay, 0, 0);
+    lv_obj_set_scroll_dir(s_overlay, LV_DIR_NONE);
+    lv_obj_clear_flag(s_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_overlay, dismiss_cb, LV_EVENT_CLICKED, NULL);
+
+    // ── Panel card ───────────────────────────────────────────────────────
+    s_panel = lv_obj_create(s_overlay);
+    lv_obj_set_size(s_panel, PANEL_W, PANEL_H);
+    lv_obj_center(s_panel);
+    lv_obj_set_style_bg_color(s_panel, COL_BG, 0);
+    lv_obj_set_style_bg_opa(s_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_panel, RADIUS, 0);
+    lv_obj_set_style_border_color(s_panel, lv_color_make(0x44,0x44,0x44), 0);
+    lv_obj_set_style_border_width(s_panel, 1, 0);
+    lv_obj_set_style_pad_all(s_panel, 20, 0);
+    lv_obj_set_scroll_dir(s_panel, LV_DIR_NONE);
+    lv_obj_clear_flag(s_panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Stop click events bubbling up to the dim-overlay dismiss handler
+    lv_obj_add_event_cb(s_panel, panel_click_absorb_cb, LV_EVENT_CLICKED, NULL);
+
+    // ── Close (×) button ─────────────────────────────────────────────────
+    lv_obj_t *close_btn = lv_btn_create(s_panel);
+    lv_obj_set_size(close_btn, 40, 40);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(close_btn, COL_BTN, 0);
+    lv_obj_set_style_radius(close_btn, 8, 0);
+    lv_obj_set_style_border_width(close_btn, 0, 0);
+    lv_obj_add_event_cb(close_btn, close_btn_cb, LV_EVENT_CLICKED, NULL);
+
     lv_obj_t *close_lbl = lv_label_create(close_btn);
-    lv_label_set_text(close_lbl, "Close");
+    lv_label_set_text(close_lbl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_color(close_lbl, COL_TEXT, 0);
     lv_obj_center(close_lbl);
-    lv_obj_add_event_cb(close_btn, on_back, LV_EVENT_CLICKED, (void *)1); // flag=1 means full close
+
+    // ── Step content ─────────────────────────────────────────────────────
+    s_step1_cont = build_step1(s_panel);
+    s_step2_cont = build_step2(s_panel);
+    lv_obj_add_flag(s_step2_cont, LV_OBJ_FLAG_HIDDEN);  // hidden initially
+
+    // ── Bottom button row ─────────────────────────────────────────────────
+    // Back button (hidden on step 1)
+    s_back_btn = lv_btn_create(s_panel);
+    lv_obj_set_size(s_back_btn, 140, 52);
+    lv_obj_align(s_back_btn, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(s_back_btn, COL_BTN, 0);
+    lv_obj_set_style_radius(s_back_btn, 10, 0);
+    lv_obj_set_style_border_width(s_back_btn, 0, 0);
+    lv_obj_add_flag(s_back_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(s_back_btn, back_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *back_lbl = lv_label_create(s_back_btn);
+    lv_label_set_text(back_lbl, "BACK");
+    lv_obj_set_style_text_color(back_lbl, COL_TEXT, 0);
+    lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_center(back_lbl);
+
+    // Accept / Next button
+    s_accept_btn = lv_btn_create(s_panel);
+    lv_obj_set_size(s_accept_btn, 160, 52);
+    lv_obj_align(s_accept_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(s_accept_btn, COL_ACCENT, 0);
+    lv_obj_set_style_radius(s_accept_btn, 10, 0);
+    lv_obj_set_style_border_width(s_accept_btn, 0, 0);
+    lv_obj_add_event_cb(s_accept_btn, accept_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *accept_lbl = lv_label_create(s_accept_btn);
+    lv_label_set_text(accept_lbl, "NEXT");
+    lv_obj_set_style_text_color(accept_lbl, lv_color_make(0x18,0x18,0x18), 0);
+    lv_obj_set_style_text_font(accept_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_center(accept_lbl);
+
+    s_step = 1;
+    ESP_LOGI(TAG, "Menu shown");
 }
 
-// Page 2: Choose image variant
-static void build_image_page(void) {
-    lv_obj_clean(menu.panel);
+void menu_hide(void)
+{
+    if (s_overlay == NULL) return;
 
-    lv_obj_t *title = lv_label_create(menu.panel);
-    lv_label_set_text(title, menu.active_element == ELEMENT_NEEDLE ? "Select Needle" : "Select Face");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+    lv_obj_delete(s_overlay);
+    s_overlay    = NULL;
+    s_panel      = NULL;
+    s_step1_cont = NULL;
+    s_step2_cont = NULL;
+    s_accept_btn = NULL;
+    s_back_btn   = NULL;
+    memset(s_face_btns,  0, sizeof(s_face_btns));
+    memset(s_color_btns, 0, sizeof(s_color_btns));
 
-    const ImageOption *options = (menu.active_element == ELEMENT_NEEDLE) ? needle_options : face_options;
-    int count                  = (menu.active_element == ELEMENT_NEEDLE) ? NEEDLE_OPTION_COUNT : FACE_OPTION_COUNT;
-
-    for (int i = 0; i < count; i++) {
-        lv_obj_t *btn = lv_button_create(menu.panel);
-        lv_obj_set_width(btn, LV_PCT(100));
-        lv_obj_set_style_bg_color(btn, lv_color_make(50, 50, 80), 0);
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, options[i].label);
-        lv_obj_center(lbl);
-        lv_obj_add_event_cb(btn, on_image_selected, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-    }
-
-    add_back_button(menu.panel);
-}
-
-// Page 3: Choose colour
-static void build_colour_page(void) {
-    lv_obj_clean(menu.panel);
-
-    lv_obj_t *title = lv_label_create(menu.panel);
-    lv_label_set_text(title, "Select Colour");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-
-    // Colour swatches in a grid row
-    lv_obj_t *grid = lv_obj_create(menu.panel);
-    lv_obj_set_width(grid, LV_PCT(100));
-    lv_obj_set_height(grid, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(grid, 0, 0);
-    lv_obj_set_style_pad_gap(grid, 10, 0);
-
-    for (int i = 0; i < PALETTE_SIZE; i++) {
-        lv_obj_t *swatch = lv_button_create(grid);
-        lv_obj_set_size(swatch, 50, 50);
-        lv_obj_set_style_bg_color(swatch, colour_palette[i], 0);
-        lv_obj_set_style_radius(swatch, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_color(swatch, lv_color_white(), 0);
-        lv_obj_set_style_border_width(swatch, 2, 0);
-        lv_obj_add_event_cb(swatch, on_colour_selected, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-    }
-
-    // Confirm button (disabled until colour is picked)
-    lv_obj_t *confirm_btn = lv_button_create(menu.panel);
-    lv_obj_set_width(confirm_btn, LV_PCT(100));
-    lv_obj_set_style_bg_color(confirm_btn, lv_color_make(30, 100, 30), 0);
-    lv_obj_add_flag(confirm_btn, LV_OBJ_FLAG_HIDDEN); // shown after colour tap
-    lv_obj_t *confirm_lbl = lv_label_create(confirm_btn);
-    lv_label_set_text(confirm_lbl, LV_SYMBOL_OK " Apply");
-    lv_obj_center(confirm_lbl);
-    lv_obj_add_event_cb(confirm_btn, on_confirm, LV_EVENT_CLICKED, NULL);
-    lv_obj_set_user_data(confirm_btn, confirm_btn); // store ref for colour cb
-
-    // Store confirm btn ref on grid so colour cb can find it
-    lv_obj_set_user_data(grid, confirm_btn);
-
-    add_back_button(menu.panel);
-}
-
-// ---- Event callbacks ---------------------------------------
-
-static void open_menu(lv_event_t *e) {
-    if (menu.overlay != NULL) return; // already open
-    pause_animation();
-    menu.overlay = create_overlay();
-    menu.panel   = create_panel();
-    build_element_page();
-}
-
-static void close_menu(void) {
-    if (menu.overlay) {
-        lv_obj_delete(menu.overlay);
-        menu.overlay = NULL;
-        menu.panel   = NULL;
-    }
-    resume_animation();
-}
-
-static void on_back(lv_event_t *e) {
-    // flag=1 means close entirely (used by Close button on page 1)
-    intptr_t flag = (intptr_t)lv_event_get_user_data(e);
-    if (flag == 1) {
-        close_menu();
-    } else {
-        build_element_page();
-    }
-}
-
-static void on_element_selected(lv_event_t *e) {
-    menu.active_element = (SelectedElement)(intptr_t)lv_event_get_user_data(e);
-    build_image_page();
-}
-
-static void on_image_selected(lv_event_t *e) {
-    int idx = (intptr_t)lv_event_get_user_data(e);
-    const ImageOption *options = (menu.active_element == ELEMENT_NEEDLE) ? needle_options : face_options;
-    menu.pending_img_src = options[idx].src;
-    menu.colour_selected = false;
-    build_colour_page();
-}
-
-static void on_colour_selected(lv_event_t *e) {
-    int idx = (intptr_t)lv_event_get_user_data(e);
-    menu.pending_colour  = colour_palette[idx];
-    menu.colour_selected = true;
-
-    // Highlight selected swatch and reveal confirm button
-    lv_obj_t *swatch = lv_event_get_target(e);
-    lv_obj_t *grid   = lv_obj_get_parent(swatch);
-
-    // Reset all swatch borders
-    uint32_t child_count = lv_obj_get_child_count(grid);
-    for (uint32_t i = 0; i < child_count; i++) {
-        lv_obj_set_style_border_width(lv_obj_get_child(grid, i), 2, 0);
-        lv_obj_set_style_border_color(lv_obj_get_child(grid, i), lv_color_white(), 0);
-    }
-    // Highlight tapped swatch
-    lv_obj_set_style_border_width(swatch, 4, 0);
-    lv_obj_set_style_border_color(swatch, lv_color_white(), 0);
-
-    // Show confirm button
-    lv_obj_t *confirm_btn = (lv_obj_t *)lv_obj_get_user_data(grid);
-    lv_obj_clear_flag(confirm_btn, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void on_confirm(lv_event_t *e) {
-    apply_selections();
-    close_menu();
-}
-
-// ---- Apply selections to live objects ----------------------
-static void apply_selections(void) {
-    lv_obj_t *target = (menu.active_element == ELEMENT_NEEDLE) ? menu.needle_img : menu.face_img;
-
-    // Swap image source
-    lv_image_set_src(target, menu.pending_img_src);
-
-    // Apply recolour
-    lv_obj_set_style_image_recolor(target, menu.pending_colour, 0);
-    lv_obj_set_style_image_recolor_opa(target, LV_OPA_50, 0); // blend strength, adjust to taste
-}
-
-// ---- Public init -------------------------------------------
-void menu_init(lv_obj_t *needle_img, lv_obj_t *face_img, lv_anim_exec_xcb_t angle_cb) {
-    menu.needle_img  = needle_img;
-    menu.face_img    = face_img;
-    //menu.needle_anim = needle_anim;
-    menu.overlay     = NULL;
-    menu.panel       = NULL;
-    menu.angle_cb   = angle_cb;    // ← store it
-
-    // Attach tap handler to the screen
-    lv_obj_add_event_cb(lv_scr_act(), open_menu, LV_EVENT_CLICKED, NULL);
+    ESP_LOGI(TAG, "Menu hidden");
 }

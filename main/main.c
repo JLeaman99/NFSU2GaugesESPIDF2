@@ -44,10 +44,14 @@
 #pragma endregion
 
 
+
+#define DEBUG_DASH 1
+
 //CAN VARIABLES
 #define CAN_TX_GPIO (gpio_num_t)5
 #define CAN_RX_GPIO (gpio_num_t)4
-
+#define RX_TASK_PRIO            8
+ int countTry = 0;
 
 //FS Driver
 #define MOUNT_POINT "/sdcard"
@@ -55,8 +59,8 @@ static const char *TAG = "example";
 
 #pragma region Image Declare
 
-static RamImage ram_background, ram_middle, ram_needle, ram_hud, ram_fuel;
-
+RamImage ram_background, ram_middle, ram_needle, ram_hud, ram_fuel;
+lv_obj_t *static_canvas = NULL;
 
 LV_IMG_DECLARE(FUELfull);
 LV_IMG_DECLARE(face);
@@ -183,8 +187,19 @@ void demo_Waveshare(){
     lv_label_set_text(label, "Hello, World!");
     lv_obj_center(label);
 }
+bool InitialMessage(void){
+    twai_message_t message;
+if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
+    printf("Message received\n");\
+    return true;
+} else {
+    printf("Failed to receive message\n");
+    return false;
+}
+}
 
-void CANSetup(void){
+bool CANSetup(void){
+    
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO,CAN_RX_GPIO,TWAI_MODE_LISTEN_ONLY);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS(); //Potentially TWAI_TIMING_CONFIG_500KBITS
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL(); //May need to be changed to reduce data overload
@@ -193,28 +208,36 @@ void CANSetup(void){
         printf("Driver installed\n");
     } else {
         printf("Failed to install driver\n");
-        return;
+        return false;
     }
 
     //Start TWAI driver
     if (twai_start() == ESP_OK) {
         printf("Driver started\n");
+            
     } else {
         printf("Failed to start driver\n");
-        return;
+        return false;
     }
+    if(InitialMessage() == true){
+            return true;
+        }
+    return false;
 
 }
 
-void ReceiveMessage(void){
+static void ReceiveMessage(void *arg){
+    while(1){
 //Wait for message to be received
 twai_message_t message;
-if (twai_receive(&message, pdMS_TO_TICKS(10000)) == ESP_OK) {
+if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
     printf("Message received\n");
 } else {
     printf("Failed to receive message\n");
     return;
 }
+
+
 
 //Process received message
 if (message.extd) {
@@ -224,11 +247,14 @@ if (message.extd) {
 }
 printf("ID is %d\n", message.identifier);
 if (!(message.rtr)) {
+    printf("DLC = %d\n",message.data_length_code);
     for (int i = 0; i < message.data_length_code; i++) {
         printf("Data byte %d = %d\n", i, message.data[i]);
     }
 }
 }
+}
+
 
 void SendMessage(uint8_t toSend[])
 {
@@ -494,11 +520,14 @@ static void DrawLabel(lv_style_t *labelStyle, lv_obj_t **label, const char *init
         CreateAnimation(*label,ui_set_speed, 0, 250, true);
     }
 }
-static lv_obj_t *static_canvas = NULL;
+
 
 static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv_color_t mid_tint, lv_opa_t mid_tint_opa) { 
      if (static_canvas != NULL) {
         lv_obj_delete(static_canvas);
+        lv_obj_clear_flag(face_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(mid_img,  LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(hud_img,  LV_OBJ_FLAG_HIDDEN);
         static_canvas = NULL;
     }
 
@@ -630,10 +659,61 @@ void run_anim(){
 
 
 
+static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
+{
+    ESP_LOGI("APPLY", "Face: %s, Color: %s", face->name, color->name);
+    bsp_display_lock(0);
+
+    // --- Unload old face images from PSRAM ---
+    image_unload(&ram_background);
+    image_unload(&ram_middle);
+    image_unload(&ram_needle);
+
+    // --- Load new face images ---
+    if (image_load_from_sd(&ram_background, face->face_bin)   != ESP_OK ||
+        image_load_from_sd(&ram_middle,     face->mid_bin)    != ESP_OK ||
+        image_load_from_sd(&ram_needle,     face->needle_bin) != ESP_OK)
+    {
+        ESP_LOGE("MENU_APPLY", "Failed to load new face images – reverting not implemented");
+        bsp_display_unlock();
+        return;
+    }
+
+    // Update LVGL image sources (already drawn objects, just change src)
+    lv_image_set_src(face_img,   &ram_background.dsc);
+    lv_image_set_src(mid_img,    &ram_middle.dsc);
+    lv_image_set_src(needle_img, &ram_needle.dsc);
+
+    // Re-flatten static layers with new tint
+    FlattenStaticLayers(color->face_tint, color->face_tint_opa,
+                        color->mid_tint,  color->mid_tint_opa);
+
+    bsp_display_unlock();
+    ESP_LOGI("MENU_APPLY", "Applied face=%s", face->name);
+}
+
+static void dash_longpress_cb(lv_event_t *e)
+{
+    menu_show();
+}
+
+
 void app_main(void)
 {
     Setup();
-   
+  
+    while (countTry < 1){
+        if(CANSetup() == true)
+        {
+        xTaskCreatePinnedToCore(ReceiveMessage, "TWAI_Recieve", 4096, NULL, RX_TASK_PRIO, NULL, tskNO_AFFINITY);
+        }
+        else{
+        ESP_LOGI(TAG,"Retrying CANBUS Initialization Count = %d", countTry);
+        countTry++;
+        }
+    
+    }
+
 
     //fill_screen_with_color(LV_COLOR_WHITE);
     /*
@@ -652,7 +732,10 @@ void app_main(void)
     bsp_display_lock(0);
     //DrawTest();
     DrawDash();
+    // Register long-press on the screen to open the menu
+    lv_obj_add_event_cb(lv_scr_act(), dash_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     bsp_display_unlock();
+
     //DrawImage(fuel_img, &FUELfull);  
 
     // Disable scrolling for the entire screen
