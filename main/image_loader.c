@@ -103,7 +103,7 @@ fclose(f);
 
 if (bytes_read != data_size) {
     ESP_LOGE(TAG, "Read %zu of %lu bytes", bytes_read, data_size);
-    free(out->buf);
+    heap_caps_free(out->buf);
     out->buf = NULL;
     return ESP_ERR_INVALID_SIZE;
 }
@@ -123,8 +123,11 @@ ESP_LOGI(TAG, "Loaded %dx%d cf=%d stride=%lu (%lu bytes in PSRAM)",  w, h, cf, s
 
 void image_unload(RamImage *img) {
     if (img->buf) {
-        free(img->buf);
+        heap_caps_free(img->buf);
         img->buf = NULL;
     }
+    img->buf_size = 0;
     img->loaded = false;
+    memset(&img->dsc, 0, sizeof(img->dsc));
+
 }

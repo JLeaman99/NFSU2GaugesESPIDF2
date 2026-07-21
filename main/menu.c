@@ -22,24 +22,38 @@
 
 static const GaugeFace FACES[] = {
     { "Tabby",   "S:themes/tabby/face.bin",   "S:themes/tabby/mid.bin",   "S:themes/tabby/needle.bin"   },
-    { "Circuit", "S:themes/circuit/face.bin", "S:themes/circuit/mid.bin", "S:themes/circuit/needle.bin" },
+    { "Flames", "S:themes/flames/face.bin", "S:themes/flames/mid.bin", "S:themes/flames/needle.bin" },
     { "Minimal", "S:themes/minimal/face.bin", "S:themes/minimal/mid.bin", "S:themes/minimal/needle.bin" },
 };
 #define FACE_COUNT (sizeof(FACES) / sizeof(FACES[0]))
 
-static const ThemeColor COLORS[] = {
-    { "Amber",   {}, LV_OPA_50, {}, LV_OPA_50 },   // filled below in menu_init
-    { "Ice",     {}, LV_OPA_50, {}, LV_OPA_50 },
-    { "Rose",    {}, LV_OPA_50, {}, LV_OPA_50 },
+
+static ThemeColor COLORS[] = {
+    { "Default",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "White",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Red",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Rose",   {}, LV_OPA_50, {}, LV_OPA_50 },   // filled below in menu_init
+    { "Orange",     {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Yellow",    {}, LV_OPA_50, {}, LV_OPA_50 },
     { "Lime",    {}, LV_OPA_50, {}, LV_OPA_50 },
-    { "Cobalt",  {}, LV_OPA_50, {}, LV_OPA_50 },
-    { "Mono",    {}, LV_OPA_30, {}, LV_OPA_30 },
+    { "Green",  {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Navy",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Ice",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Cyan",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Blue",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Purple",   {}, LV_OPA_50, {}, LV_OPA_50 },
+    { "Magenta",   {}, LV_OPA_50, {}, LV_OPA_50 },
+   
 };
 #define COLOR_COUNT (sizeof(COLORS) / sizeof(COLORS[0]))
 
 // Raw hex values kept separately so the struct can have lv_color_t later
-static const uint32_t COLOR_FACE_HEX[]  = { 0xC8C566, 0x66C8C5, 0xFF0064, 0x66FF44, 0x4488FF, 0xCECECE };
-static const uint32_t COLOR_MID_HEX[]   = { 0xFF0064, 0x0064FF, 0xFF6600, 0xFF0064, 0xFF0099, 0xCECECE };
+static const uint32_t COLOR_FACE_HEX[]  = { 0x001122, 0xFFFFFF, 0xFF0000, 0xFF0064, 0xFF4200, 0xFFC900, 0x66FF44, 0x1BF734, 0x000396,0x4488FF, 0x00FFFF, 0x0000FF, 0x8B00FF, 0xFF00FF};
+
+//static const uint32_t COLOR_FACE_HEX[]  = { 0x001122, 0xC8C566, 0x66C8C5, 0xFF0064, 0x66FF44, 0x4488FF, 0xCECECE};
+//static const uint32_t COLOR_MID_HEX[]   = { 0x001122, 0xFF0064, 0x0064FF, 0xFF6600, 0xFF0064, 0xFF0099, 0xCECECE};
+
+static const uint32_t COLOR_MID_HEX[]   = { 0x001122, 0xFFFFFF, 0xFF0000, 0xFF0064, 0xFF4200, 0xFFC900, 0x66FF44, 0x1BF734, 0x000396,0x4488FF, 0x00FFFF, 0x0000FF, 0x8B00FF, 0xFF00FF};
 
 // ── Internal state ─────────────────────────────────────────────────────────
 
@@ -48,19 +62,26 @@ static lv_obj_t       *s_overlay   = NULL;   // full-screen dim container
 static lv_obj_t       *s_panel     = NULL;   // the white card
 
 static int s_sel_face  = 0;   // currently highlighted face index
-static int s_sel_color = 0;   // currently highlighted color index
+static int s_sel_face_color = 0;   // currently highlighted color index
+static int s_sel_mid_color = 0;   // currently highlighted color index
 static int s_step      = 1;   // 1 = face picker, 2 = color picker
 
 // Per-step content containers (swapped in/out)
 static lv_obj_t *s_step1_cont = NULL;
 static lv_obj_t *s_step2_cont = NULL;
+static lv_obj_t *s_step3_cont = NULL;
+
 static lv_obj_t *s_accept_btn = NULL;
 static lv_obj_t *s_back_btn   = NULL;
 
 // Keep references to face + color buttons so we can highlight the selection
 static lv_obj_t *s_face_btns [FACE_COUNT];
 static lv_obj_t *s_color_btns[COLOR_COUNT];
+static lv_obj_t *s_mid_color_btns[COLOR_COUNT];  // step 3 mid colour buttons
 
+static lv_obj_t *s_step1_label = NULL;
+static lv_obj_t *s_step2_label = NULL;
+static lv_obj_t *s_step3_label = NULL;
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 #define PANEL_W   680
@@ -138,26 +159,39 @@ static lv_obj_t *build_step1(lv_obj_t *parent)
 
     // Step label
     lv_obj_t *lbl = lv_label_create(parent);
-    lv_label_set_text(lbl, "SELECT GAUGE FACE");
+    lv_label_set_text(lbl, "SELECT GAUGE");
     lv_obj_set_style_text_color(lbl, COL_SUBTEXT, 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 20);
-
+    s_step1_label = lbl;
     return cont;
 }
 
 // ── Colour swatch ─────────────────────────────────────────────────────────
 
-static void color_btn_cb(lv_event_t *e)
+static void mid_color_btn_cb(lv_event_t *e)
 {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    s_sel_color = idx;
+    s_sel_mid_color = idx;
+
+    for (int i = 0; i < (int)COLOR_COUNT; i++) {
+        // Keep the swatch's actual colour; just vary the border
+        lv_obj_set_style_border_color(s_mid_color_btns[i],
+            i == s_sel_mid_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+        lv_obj_set_style_border_width(s_mid_color_btns[i], i == s_sel_mid_color ? 4 : 1, 0);
+    }
+}
+
+static void face_color_btn_cb(lv_event_t *e)
+{
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    s_sel_face_color = idx;
 
     for (int i = 0; i < (int)COLOR_COUNT; i++) {
         // Keep the swatch's actual colour; just vary the border
         lv_obj_set_style_border_color(s_color_btns[i],
-            i == s_sel_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
-        lv_obj_set_style_border_width(s_color_btns[i], i == s_sel_color ? 4 : 1, 0);
+            i == s_sel_face_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+        lv_obj_set_style_border_width(s_color_btns[i], i == s_sel_face_color ? 4 : 1, 0);
     }
 }
 
@@ -168,7 +202,10 @@ static lv_obj_t *build_step2(lv_obj_t *parent)
     lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cont, 0, 0);
     lv_obj_set_style_pad_all(cont, 0, 0);
-    lv_obj_set_scroll_dir(cont, LV_DIR_NONE);
+
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);          // vertical scroll only
+    lv_obj_set_style_max_height(cont, 380, 0);         // cap height to panel space
+    lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
     lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 60);
 
     // 3-column flex grid
@@ -179,37 +216,108 @@ static lv_obj_t *build_step2(lv_obj_t *parent)
 
     for (int i = 0; i < (int)COLOR_COUNT; i++) {
         lv_obj_t *swatch = lv_obj_create(cont);
-        lv_obj_set_size(swatch, 160, 120);
+        lv_obj_set_size(swatch, 120, 120);
         lv_obj_set_scroll_dir(swatch, LV_DIR_NONE);
-        lv_obj_set_style_radius(swatch, 12, 0);
+        lv_obj_set_style_radius(swatch, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(swatch, lv_color_hex(COLOR_FACE_HEX[i]), 0);
         lv_obj_set_style_border_color(swatch,
-            i == s_sel_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
-        lv_obj_set_style_border_width(swatch, i == s_sel_color ? 4 : 1, 0);
+            i == s_sel_face_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+        lv_obj_set_style_border_width(swatch, i == s_sel_face_color ? 4 : 1, 0);
         lv_obj_add_flag(swatch, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(swatch, color_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(swatch, face_color_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         // Colour name label
         lv_obj_t *name = lv_label_create(swatch);
         lv_label_set_text(name, COLORS[i].name);
         lv_obj_set_style_text_color(name, COL_TEXT, 0);
-        lv_obj_set_style_text_font(name, &lv_font_montserrat_16, 0);
-        lv_obj_align(name, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+        lv_obj_align(name, LV_ALIGN_CENTER, 0, -8);
 
         s_color_btns[i] = swatch;
     }
 
     // Step label
     lv_obj_t *lbl = lv_label_create(parent);
-    lv_label_set_text(lbl, "SELECT COLOUR");
+    lv_label_set_text(lbl, "SELECT FACE COLOUR");
     lv_obj_set_style_text_color(lbl, COL_SUBTEXT, 0);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
     lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 20);
+    s_step2_label = lbl;
+    return cont;
+}
 
+static lv_obj_t *build_step3(lv_obj_t *parent)
+{
+    lv_obj_t *cont = lv_obj_create(parent);
+    lv_obj_set_size(cont, PANEL_W - 40, 340);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0);
+    
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);          // vertical scroll only
+    lv_obj_set_style_max_height(cont, 380, 0);         // cap height to panel space
+    lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
+    
+
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 60);
+
+    // 3-column flex grid
+    lv_obj_set_layout(cont, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_gap(cont, 14, 0);
+
+    for (int i = 0; i < (int)COLOR_COUNT; i++) {
+        lv_obj_t *swatch = lv_obj_create(cont);
+        lv_obj_set_size(swatch, 120, 120);
+        lv_obj_set_scroll_dir(swatch, LV_DIR_NONE);
+        lv_obj_set_style_radius(swatch, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(swatch, lv_color_hex(COLOR_MID_HEX[i]), 0);
+        lv_obj_set_style_border_color(swatch,
+            i == s_sel_mid_color ? COL_ACCENT : lv_color_make(0x44,0x44,0x44), 0);
+        lv_obj_set_style_border_width(swatch, i == s_sel_mid_color ? 4 : 1, 0);
+        lv_obj_add_flag(swatch, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(swatch, mid_color_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        // Colour name label
+        lv_obj_t *name = lv_label_create(swatch);
+        lv_label_set_text(name, COLORS[i].name);
+        lv_obj_set_style_text_color(name, COL_TEXT, 0);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+        lv_obj_align(name, LV_ALIGN_CENTER, 0, -8);
+
+        s_mid_color_btns[i] = swatch;
+    }
+
+    // Step label
+    lv_obj_t *lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, "SELECT MID COLOUR");
+    lv_obj_set_style_text_color(lbl, COL_SUBTEXT, 0);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 20);
+    s_step3_label = lbl;
     return cont;
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────
+
+static void go_step3(void)
+{
+    s_step = 3;
+    lv_obj_add_flag(s_step1_cont, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step2_cont, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_back_btn,  LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(lv_obj_get_child(s_accept_btn, 0), "APPLY");
+        // Hide step 1 content and label
+    lv_obj_add_flag(s_step1_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step1_label, LV_OBJ_FLAG_HIDDEN);
+
+        lv_obj_add_flag(s_step2_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step2_label, LV_OBJ_FLAG_HIDDEN);
+    // Show step 2 content and label
+    lv_obj_clear_flag(s_step3_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_step3_label, LV_OBJ_FLAG_HIDDEN);
+}
 
 static void go_step2(void)
 {
@@ -217,7 +325,15 @@ static void go_step2(void)
     lv_obj_add_flag(s_step1_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_step2_cont, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_back_btn,  LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(lv_obj_get_child(s_accept_btn, 0), "APPLY");
+    lv_label_set_text(lv_obj_get_child(s_accept_btn, 0), "NEXT");
+        // Hide step 1 content and label
+    lv_obj_add_flag(s_step1_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step1_label, LV_OBJ_FLAG_HIDDEN);
+    
+
+    // Show step 2 content and label
+    lv_obj_clear_flag(s_step2_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_step2_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void go_step1(void)
@@ -227,6 +343,16 @@ static void go_step1(void)
     lv_obj_add_flag(s_step2_cont,  LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_back_btn,    LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(lv_obj_get_child(s_accept_btn, 0), "NEXT");
+
+        // Show step 1 content and label
+    lv_obj_clear_flag(s_step1_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(s_step1_label, LV_OBJ_FLAG_HIDDEN);
+
+    // Hide step 2 content and label
+    lv_obj_add_flag(s_step2_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step2_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step3_cont,  LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step3_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ── Button callbacks ───────────────────────────────────────────────────────
@@ -238,11 +364,26 @@ static void accept_cb(lv_event_t *e)
         return;
     }
 
-    // Step 2: commit
+    if (s_step == 2) {
+        go_step3();
+        return;
+    }
+
+    // Step 3: commit
+
+        static ThemeColor result;
+    result.name      = COLORS[s_sel_face_color].name;
+    result.face_tint = lv_color_hex(COLOR_FACE_HEX[s_sel_face_color]);
+    result.face_tint_opa  = LV_OPA_50;
+    result.mid_tint  = lv_color_hex(COLOR_MID_HEX[s_sel_mid_color]);
+    result.mid_tint_opa   = LV_OPA_50;
+    result.retint    = (COLOR_FACE_HEX[s_sel_face_color] != 0x001122 ||
+                        COLOR_MID_HEX[s_sel_mid_color]   != 0x001122);
+
     menu_hide();
 
     if (s_apply_cb) {
-        s_apply_cb(&FACES[s_sel_face], &COLORS[s_sel_color]);
+        s_apply_cb(&FACES[s_sel_face], &result);
     }
 }
 
@@ -276,6 +417,11 @@ void menu_init(menu_apply_cb_t apply_cb)
         ThemeColor *c = (ThemeColor *)&COLORS[i];
         c->face_tint = lv_color_hex(COLOR_FACE_HEX[i]);
         c->mid_tint  = lv_color_hex(COLOR_MID_HEX[i]);
+        if(COLOR_FACE_HEX[i] == 0x001122 && COLOR_MID_HEX[i] == 0x001122) {
+            c->retint = false; // Mono theme, don't recolour static layers
+        } else {
+            c->retint = true;  // Recolour static layers
+        }
     }
 
     ESP_LOGI(TAG, "menu_init: %d faces, %d colours", (int)FACE_COUNT, (int)COLOR_COUNT);
@@ -336,7 +482,12 @@ void menu_show(void)
     // ── Step content ─────────────────────────────────────────────────────
     s_step1_cont = build_step1(s_panel);
     s_step2_cont = build_step2(s_panel);
+    s_step3_cont = build_step3(s_panel);
     lv_obj_add_flag(s_step2_cont, LV_OBJ_FLAG_HIDDEN);  // hidden initially
+    lv_obj_add_flag(s_step2_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_step3_cont, LV_OBJ_FLAG_HIDDEN);  // hidden initially
+    lv_obj_add_flag(s_step3_label, LV_OBJ_FLAG_HIDDEN);
+
 
     // ── Bottom button row ─────────────────────────────────────────────────
     // Back button (hidden on step 1)
@@ -387,6 +538,9 @@ void menu_hide(void)
     s_back_btn   = NULL;
     memset(s_face_btns,  0, sizeof(s_face_btns));
     memset(s_color_btns, 0, sizeof(s_color_btns));
+    memset(s_mid_color_btns, 0, sizeof(s_mid_color_btns));
+    s_sel_face_color = 0;
+    s_sel_mid_color  = 0;
 
     ESP_LOGI(TAG, "Menu hidden");
 }

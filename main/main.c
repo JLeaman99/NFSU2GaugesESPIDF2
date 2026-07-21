@@ -31,6 +31,7 @@
 
 //CAN imports
 #include "driver/twai.h"
+//#include "esp_twai.h"
 #include "driver/gpio.h"
 #include "helvetica_60.h"
 #include "helvetica_B_I_70.h"
@@ -61,17 +62,19 @@ static const char *TAG = "example";
 
 RamImage ram_background, ram_middle, ram_needle, ram_hud, ram_fuel;
 lv_obj_t *static_canvas = NULL;
+lv_obj_t *fuel_arc = NULL;
 
-LV_IMG_DECLARE(FUELfull);
-LV_IMG_DECLARE(face);
-LV_IMG_DECLARE(mid);
-LV_IMG_DECLARE(needle);
+// LV_IMG_DECLARE(FUELfull);
+// LV_IMG_DECLARE(face);
+// LV_IMG_DECLARE(mid);
+// LV_IMG_DECLARE(needle);
 //LV_IMG_DECLARE(HUD);
 
 // LV_FONT_DECLARE(helvetica_60);
 // LV_FONT_DECLARE(helvetica_B_I_70);
 #pragma endregion
 
+TaskHandle_t TWAI_Recieve_Task;
 
 lv_obj_t *face_img, *mid_img, *needle_img, *fuel_img, *hud_img;
 static lv_obj_t *speed_label, *unit_label, *gear_label;
@@ -83,6 +86,7 @@ static lv_obj_t *speed_label, *unit_label, *gear_label;
 #define LV_COLOR_BLUE lv_color_make(0x00, 0x00, 0xFF)
 #define LV_COLOR_WHITE lv_color_make(0xFF, 0xFF, 0xFF)
 #define LV_COLOR_BLACK lv_color_make(0x00, 0x00, 0x00) // Define black color
+#define DEFAULTCOLOUR lv_color_hex(0x001122)
 
 
 typedef enum {
@@ -200,8 +204,10 @@ if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
 
 bool CANSetup(void){
     
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO,CAN_RX_GPIO,TWAI_MODE_LISTEN_ONLY);
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS(); //Potentially TWAI_TIMING_CONFIG_500KBITS
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_4, TWAI_MODE_LISTEN_ONLY); // Set to no-acknowledgment mode for testing
+    g_config.mode = TWAI_MODE_LISTEN_ONLY; // Set to normal mode for standard operation
+
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS(); //Potentially TWAI_TIMING_CONFIG_500KBITS
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL(); //May need to be changed to reduce data overload
 
     if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
@@ -214,15 +220,15 @@ bool CANSetup(void){
     //Start TWAI driver
     if (twai_start() == ESP_OK) {
         printf("Driver started\n");
-            
+            return true;
     } else {
         printf("Failed to start driver\n");
         return false;
     }
-    if(InitialMessage() == true){
-            return true;
-        }
-    return false;
+    // if(InitialMessage() == true){
+    //         return true;
+    //     }
+    return true;
 
 }
 
@@ -230,12 +236,14 @@ static void ReceiveMessage(void *arg){
     while(1){
 //Wait for message to be received
 twai_message_t message;
-if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
+
+if (twai_receive(&message, pdMS_TO_TICKS(10000)) == ESP_OK) {
     printf("Message received\n");
+    
 } else {
     printf("Failed to receive message\n");
-    return;
-}
+    continue; // Skip processing if no message is received
+    }
 
 
 
@@ -255,26 +263,38 @@ if (!(message.rtr)) {
 }
 }
 
+uint32_t getNextCanId() {
+  static uint8_t index = 0;
+  uint32_t baseId = 0x100;
+  uint32_t id = baseId + index;
+  index = (index + 1) % 10;  // Cycle back to 0 after 9
+  return id;
+}
 
-void SendMessage(uint8_t toSend[])
+static void SendMessage(void *arg)
 {
-
-    // WILL NEED TO VERIFY THAT toSEND doesnt need to be a pointer and how to set message data
-    //Configure message to transmit
+    while(1){
 twai_message_t message;
 message.identifier = 0xAAAA;
 message.extd = 1;
-message.data_length_code = sizeof(toSend) / sizeof(toSend[0]);
-
-for (int i = 0; i < message.data_length_code; i++) {
-    message.data[i] = toSend[i];
+message.data_length_code = 4;
+for (int i = 0; i < 4; i++) {
+    message.data[i] = 0;
 }
 
+esp_err_t err = twai_transmit(&message, pdMS_TO_TICKS(3000));
 //Queue message for transmission
-if (twai_transmit(&message, pdMS_TO_TICKS(1000)) == ESP_OK) {
+if (err == ESP_OK) {
     printf("Message queued for transmission\n");
-} else {
-    printf("Failed to queue message for transmission\n");
+} else if (err == ESP_ERR_TIMEOUT) {    
+    printf("Failed on Timeout\n");
+}
+else if (err == ESP_ERR_INVALID_ARG) {
+    printf("Invalid argument\n");
+}
+else if (err == ESP_FAIL) {
+    printf("Driver not installed or stopped\n");
+}
 }
 }
 
@@ -461,7 +481,50 @@ static void ui_set_speed(void * label, int32_t speed)
     //lv_obj_invalidate((lv_obj_t *)label);   // ← already just the needle if called on needle_img
 }
 
+static void set_fuel_level_anim(void *arc, int32_t value) {
+    lv_arc_set_value((lv_obj_t *)arc, value);
+}
+
+//TODO CREATE FUEL ARC AND ANIMATION
+static void CreateFuelArc(int32_t x_offset, int32_t y_offset) {
+    fuel_arc = lv_arc_create(lv_scr_act());
+
+    // Match your fuel gauge graphic size and position
+    lv_obj_set_size(fuel_arc, 730, 695);
+    lv_obj_align(fuel_arc, LV_ALIGN_CENTER, x_offset, y_offset);
+
+    // Arc sweeps from 180° (9 o'clock, empty) to 360° (3 o'clock, full)
+    lv_arc_set_bg_angles(fuel_arc, 195, 335);
+    lv_arc_set_range(fuel_arc, 0, 10);
+    lv_arc_set_value(fuel_arc, 10);
+
+    // Hide background track
+    lv_obj_set_style_arc_opa(fuel_arc, LV_OPA_TRANSP, LV_PART_MAIN);
+
+    // Match your PNG arc width — 40px arc width needs padding adjustment
+    lv_obj_set_style_arc_width(fuel_arc, 30, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(fuel_arc, false, LV_PART_INDICATOR);  // flat ends to match PNG
+    lv_obj_set_style_arc_color(fuel_arc, lv_color_make(0, 165, 255), LV_PART_INDICATOR);
+
+    // Pull arc inward so its centre radius matches your PNG
+    // arc sits at outer edge by default — pad inward by half arc width
+    lv_obj_set_style_pad_all(fuel_arc, 15, LV_PART_MAIN);  // half of 40px width
+
+    // Hide knob
+    lv_obj_set_style_bg_opa(fuel_arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(fuel_arc, 0, LV_PART_KNOB);
+
+    // Non interactive
+    lv_obj_remove_flag(fuel_arc, LV_OBJ_FLAG_CLICKABLE);
+
+    // Layer order — above canvas, below needle
+    lv_obj_move_foreground(fuel_arc);
+    lv_obj_move_foreground(needle_img);
+}
+
 static void CreateAnimation(void * img, lv_anim_exec_xcb_t change, int32_t start, int32_t end, bool test){
+    lv_anim_delete(img, change);   // ← kill any existing animation on this object
+
      lv_anim_t anim; 
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, img);
@@ -493,6 +556,25 @@ static void DrawImage(lv_obj_t ** img, const void *imgSrc){
 
 }
 
+static void DrawFuelImage(lv_obj_t ** img, const void *imgSrc){
+      //lv_obj_clear_flag(fuel_img, LV_OBJ_FLAG_HIDDEN);
+
+    *img = lv_image_create(lv_scr_act());
+      if (lv_image_src_get_type(imgSrc) == LV_IMAGE_SRC_FILE) {
+        lv_image_set_src(*img, (const char *)imgSrc);
+    } else {
+        lv_image_set_src(*img, imgSrc);
+    }
+    
+    lv_obj_set_size(*img,800,800);
+    lv_obj_center(*img);
+
+    lv_obj_clear_flag(*img, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(*img, LV_OBJ_FLAG_SCROLLABLE);
+
+    //lv_obj_add_flag(*img, LV_OBJ_FLAG_HIDDEN);  // ← start hidden, canvas reveals result
+}
+
 static void DrawNeedle(lv_obj_t ** img, const void *imgSrc){
   *img = lv_image_create(lv_scr_act());
       if (lv_image_src_get_type(imgSrc) == LV_IMAGE_SRC_FILE) {
@@ -504,7 +586,6 @@ static void DrawNeedle(lv_obj_t ** img, const void *imgSrc){
     //lv_obj_center(*img);
     lv_image_set_pivot(*img, 40, -20);
 
-    CreateAnimation(*img, set_angle, 0,2400,true);
 
 }
 
@@ -522,7 +603,7 @@ static void DrawLabel(lv_style_t *labelStyle, lv_obj_t **label, const char *init
 }
 
 
-static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv_color_t mid_tint, lv_opa_t mid_tint_opa) { 
+static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv_color_t mid_tint, lv_opa_t mid_tint_opa, bool retint) { 
      if (static_canvas != NULL) {
         lv_obj_delete(static_canvas);
         lv_obj_clear_flag(face_img, LV_OBJ_FLAG_HIDDEN);
@@ -562,14 +643,19 @@ static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv
     // ---- Draw images on top ----
     lv_draw_image_dsc_t img_dsc;
     lv_draw_image_dsc_init(&img_dsc);
+    if(retint){
     img_dsc.recolor     = face_tint;
     img_dsc.recolor_opa = face_tint_opa;
+    }
+   
 
     img_dsc.src = &ram_background.dsc;
     lv_draw_image(&layer, &img_dsc, &area);
     
+    if(retint){
     img_dsc.recolor     = mid_tint;
     img_dsc.recolor_opa = mid_tint_opa;
+    }
 
     img_dsc.src = &ram_middle.dsc;
     lv_draw_image(&layer, &img_dsc, &area);
@@ -579,7 +665,9 @@ static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv
 
     img_dsc.src = &ram_hud.dsc;
     lv_draw_image(&layer, &img_dsc, &area);
-    
+
+    //img_dsc.src = &ram_fuel.dsc;
+    //lv_draw_image(&layer, &img_dsc, &area);
 
     lv_canvas_finish_layer(static_canvas, &layer);
 
@@ -588,11 +676,11 @@ static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv
     lv_obj_add_flag(hud_img,  LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(static_canvas, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(static_canvas, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_move_foreground(needle_img);
+    //lv_obj_move_foreground(needle_img);
 }
 
 
-void DrawDash(void){
+void DrawDash(char * facePath, char * midPath, char * needlePath, lv_color_t face_tint, lv_opa_t face_tint_opa, lv_color_t mid_tint, lv_opa_t mid_tint_opa, bool retint) {
     ESP_LOGI(TAG, "DrawDash called");   // if this prints twice, something is calling it twice
 
 
@@ -601,18 +689,31 @@ ESP_LOGI(TAG, "Free PSRAM: %zu", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 ESP_LOGI(TAG, "Free internal RAM: %zu", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
         // Load from SD into PSRAM once
-    ESP_ERROR_CHECK(image_load_from_sd(&ram_background, "S:themes/tabby/face.bin"));
-    ESP_ERROR_CHECK(image_load_from_sd(&ram_middle,     "S:themes/tabby/mid.bin"));
-    ESP_ERROR_CHECK(image_load_from_sd(&ram_needle,     "S:themes/tabby/needle.bin"));
+    ESP_ERROR_CHECK(image_load_from_sd(&ram_background, facePath));
+    ESP_ERROR_CHECK(image_load_from_sd(&ram_middle,     midPath));
+    ESP_ERROR_CHECK(image_load_from_sd(&ram_needle,     needlePath));
     ESP_ERROR_CHECK(image_load_from_sd(&ram_hud,     "S:general/HUD.bin"));
+    ESP_ERROR_CHECK(image_load_from_sd(&ram_fuel,     "S:general/FUELfull.bin"));
+
 
     // Pass descriptor pointer exactly like a header image — SD never touched again
     DrawImage(&face_img, &ram_background.dsc);
     DrawImage(&mid_img,     &ram_middle.dsc);
     DrawImage(&hud_img, &ram_hud.dsc);
+    DrawImage(&fuel_img, &ram_fuel.dsc);
     DrawNeedle(&needle_img,    &ram_needle.dsc);
+    
+    CreateAnimation(needle_img, set_angle, 0,2400,true);
 
-    FlattenStaticLayers(lv_color_hex(0xC8C566),LV_OPA_50,lv_color_hex(0xFF0064), LV_OPA_50);
+
+    FlattenStaticLayers(face_tint, face_tint_opa, mid_tint, mid_tint_opa, retint); // 0xC8C566 //0xFF0064
+
+    CreateFuelArc(-5, -60);   // shift upward into top quadrants
+    CreateAnimation(fuel_arc, set_fuel_level_anim, 0, 10, true);
+    
+    
+    DrawFuelImage(&fuel_img, &ram_fuel.dsc);
+
     /*
     DrawImage(&fuel_img,&FUELfull);
     //DrawImage(&hud_img, &HUD);
@@ -621,6 +722,7 @@ ESP_LOGI(TAG, "Free internal RAM: %zu", heap_caps_get_free_size(MALLOC_CAP_INTER
     DrawNeedle(&needle_img,"S:themes/tabby/needle.bin");//&needle
     */
     //DrawImage(&hud_img,&HUD);
+   
 
     static lv_style_t labelStyle;
     lv_style_init(&labelStyle);
@@ -662,12 +764,15 @@ void run_anim(){
 static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
 {
     ESP_LOGI("APPLY", "Face: %s, Color: %s", face->name, color->name);
+    vTaskSuspend(TWAI_Recieve_Task);
     bsp_display_lock(0);
 
     // --- Unload old face images from PSRAM ---
     image_unload(&ram_background);
     image_unload(&ram_middle);
     image_unload(&ram_needle);
+    image_unload(&ram_hud);
+    image_unload(&ram_fuel);
 
     // --- Load new face images ---
     if (image_load_from_sd(&ram_background, face->face_bin)   != ESP_OK ||
@@ -684,11 +789,23 @@ static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
     lv_image_set_src(mid_img,    &ram_middle.dsc);
     lv_image_set_src(needle_img, &ram_needle.dsc);
 
-    // Re-flatten static layers with new tint
-    FlattenStaticLayers(color->face_tint, color->face_tint_opa,
-                        color->mid_tint,  color->mid_tint_opa);
+    lv_anim_del(needle_img, set_angle); // Stop any existing needle animation
+    lv_anim_del(fuel_arc, set_fuel_level_anim); // Stop any existing fuel arc animation
+    lv_anim_del(gear_label, gear_display_update_anim); // Stop any existing gear label animation
+    lv_anim_del(speed_label, ui_set_speed); // Stop any existing speed label animation
+
+
+    DrawDash(face->face_bin, face->mid_bin, face->needle_bin,
+              color->face_tint, color->face_tint_opa,
+              color->mid_tint,  color->mid_tint_opa, color->retint
+            );
+    // FlattenStaticLayers(color->face_tint, color->face_tint_opa,
+    //                     color->mid_tint,  color->mid_tint_opa);
+    // // Re-flatten static layers with new tint
+    //FlattenStaticLayers(color->face_tint, color->face_tint_opa,color->mid_tint,  color->mid_tint_opa);
 
     bsp_display_unlock();
+    vTaskResume(TWAI_Recieve_Task);
     ESP_LOGI("MENU_APPLY", "Applied face=%s", face->name);
 }
 
@@ -702,17 +819,7 @@ void app_main(void)
 {
     Setup();
   
-    while (countTry < 1){
-        if(CANSetup() == true)
-        {
-        xTaskCreatePinnedToCore(ReceiveMessage, "TWAI_Recieve", 4096, NULL, RX_TASK_PRIO, NULL, tskNO_AFFINITY);
-        }
-        else{
-        ESP_LOGI(TAG,"Retrying CANBUS Initialization Count = %d", countTry);
-        countTry++;
-        }
-    
-    }
+
 
 
     //fill_screen_with_color(LV_COLOR_WHITE);
@@ -731,42 +838,27 @@ void app_main(void)
     */
     bsp_display_lock(0);
     //DrawTest();
-    DrawDash();
+    menu_init(on_menu_apply);  // make sure this line exists and on_menu_apply is not NULL
+
+    DrawDash("S:themes/tabby/face.bin", "S:themes/tabby/mid.bin", "S:themes/tabby/needle.bin",lv_color_hex(0x313131),LV_OPA_50,lv_color_hex(0x313131), LV_OPA_50,false);
     // Register long-press on the screen to open the menu
     lv_obj_add_event_cb(lv_scr_act(), dash_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     bsp_display_unlock();
+        while (countTry < 1){
+        if(CANSetup() == true)
+        {
+        xTaskCreatePinnedToCore(ReceiveMessage, "TWAI_Recieve", 4096, NULL, RX_TASK_PRIO, &TWAI_Recieve_Task, tskNO_AFFINITY);
+        //xTaskCreatePinnedToCore(SendMessage, "TWAI_Send", 4096, NULL, RX_TASK_PRIO, NULL, tskNO_AFFINITY);
 
-    //DrawImage(fuel_img, &FUELfull);  
-
-    // Disable scrolling for the entire screen
-    //lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
-    //lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
-    //lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLL_CHAIN_VER);
-
+        break; 
+        }
+        else{
+        ESP_LOGI(TAG,"Retrying CANBUS Initialization Count = %d", countTry);
+        countTry++;
+        }
     
-    // static lv_style_t recolor_style;
-    // lv_style_init(&recolor_style);
-    // lv_style_set_image_recolor(&recolor_style, lv_color_hex(0xFF0064)); // Red tint
-    // lv_style_set_image_recolor_opa(&recolor_style, LV_OPA_50);          // 80% opacity
+    }
 
-    // lv_obj_add_style(mid_img,&recolor_style,LV_PART_MAIN);
-
-   /* static lv_style_t recolor_style2;
-    lv_style_init(&recolor_style2);
-    lv_style_set_image_recolor(&recolor_style2, lv_color_hex(0xffffff)); // yellow? tint
-    lv_style_set_image_recolor_opa(&recolor_style2, LV_OPA_50);          // 80% opacity
-    lv_obj_add_style(face_img,&recolor_style2,LV_PART_MAIN); 
-*/
-    
-
- // int needle_center_shift = 0; // how far the center of the needle is shifted from the left edge
-
-  //lv_obj_align(needle_img, LV_ALIGN_CENTER, 108 - needle_center_shift, 0);
-  //lv_image_set_pivot(needle_img, needle_center_shift, 36);
-
-  //lv_obj_set_style_image_recolor_opa(needle_img, 255, 0);
-    //run_anim();
-  
     
     while (true)
     {

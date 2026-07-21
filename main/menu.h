@@ -14,6 +14,7 @@ typedef struct {
     lv_opa_t     face_tint_opa;
     lv_color_t   mid_tint;      // recolour applied to mid layer
     lv_opa_t     mid_tint_opa;
+    bool retint; //do we want to recolour the static layers or not (for mono theme)
 } ThemeColor;
 
 // ── Gauge-face descriptors ─────────────────────────────────────────────────
