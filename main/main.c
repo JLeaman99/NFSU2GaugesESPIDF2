@@ -204,8 +204,8 @@ if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
 
 bool CANSetup(void){
     
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_4, TWAI_MODE_LISTEN_ONLY); // Set to no-acknowledgment mode for testing
-    g_config.mode = TWAI_MODE_LISTEN_ONLY; // Set to normal mode for standard operation
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_4, TWAI_MODE_NORMAL); // Set to no-acknowledgment mode for testing
+    g_config.mode = TWAI_MODE_NORMAL; // Set to normal mode for standard operation
 
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS(); //Potentially TWAI_TIMING_CONFIG_500KBITS
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL(); //May need to be changed to reduce data overload
@@ -236,11 +236,24 @@ static void ReceiveMessage(void *arg){
     while(1){
 //Wait for message to be received
 twai_message_t message;
+esp_err_t err = twai_receive(&message, pdMS_TO_TICKS(10000));
 
-if (twai_receive(&message, pdMS_TO_TICKS(10000)) == ESP_OK) {
+if (err == ESP_OK) {
     printf("Message received\n");
     
-} else {
+} else if(err == ESP_ERR_TIMEOUT) {
+    printf("Message Timeout\n");
+    continue; // Skip processing if no message is received
+    }
+     else if(err == ESP_ERR_INVALID_ARG) {
+    printf("Invalid argument\n");
+    continue; // Skip processing if no message is received
+    }
+     else if(err == ESP_ERR_INVALID_STATE) {
+    printf("Invalid state\n");
+    continue; // Skip processing if no message is received
+    }
+     else if(err == ESP_FAIL) {
     printf("Failed to receive message\n");
     continue; // Skip processing if no message is received
     }
@@ -311,7 +324,9 @@ static void *lvgl_fs_open(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode)
     char full_path[256];
     snprintf(full_path, sizeof(full_path), "%s/%s", MOUNT_POINT, clean_path);
     
+    #if DEBUG_DASH
     ESP_LOGI(TAG, "LVGL opening: %s", full_path);   // ← add this
+    #endif
     
     FILE *f = fopen(full_path, "rb");
     if (!f) {
@@ -494,7 +509,7 @@ static void CreateFuelArc(int32_t x_offset, int32_t y_offset) {
     lv_obj_align(fuel_arc, LV_ALIGN_CENTER, x_offset, y_offset);
 
     // Arc sweeps from 180° (9 o'clock, empty) to 360° (3 o'clock, full)
-    lv_arc_set_bg_angles(fuel_arc, 195, 335);
+    lv_arc_set_bg_angles(fuel_arc, 195, 320);
     lv_arc_set_range(fuel_arc, 0, 10);
     lv_arc_set_value(fuel_arc, 10);
 
@@ -622,6 +637,8 @@ static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv
             return;
         }
     }
+    memset(canvas_buf, 0, buf_size);   // ← clear before redraw
+
 
     static_canvas = lv_canvas_create(lv_scr_act());
     lv_canvas_set_buffer(static_canvas, canvas_buf, 800, 800,
@@ -680,6 +697,8 @@ static void FlattenStaticLayers(lv_color_t face_tint, lv_opa_t face_tint_opa, lv
 }
 
 
+
+
 void DrawDash(char * facePath, char * midPath, char * needlePath, lv_color_t face_tint, lv_opa_t face_tint_opa, lv_color_t mid_tint, lv_opa_t mid_tint_opa, bool retint) {
     ESP_LOGI(TAG, "DrawDash called");   // if this prints twice, something is calling it twice
 
@@ -713,16 +732,7 @@ ESP_LOGI(TAG, "Free internal RAM: %zu", heap_caps_get_free_size(MALLOC_CAP_INTER
     
     
     DrawFuelImage(&fuel_img, &ram_fuel.dsc);
-
-    /*
-    DrawImage(&fuel_img,&FUELfull);
-    //DrawImage(&hud_img, &HUD);
-    DrawImage(&face_img, &face); //&face "S:themes/tabby/face.bin"
-    DrawImage(&mid_img, &mid);//&mid"S:themes/tabby/mid.bin"
-    DrawNeedle(&needle_img,"S:themes/tabby/needle.bin");//&needle
-    */
-    //DrawImage(&hud_img,&HUD);
-   
+  
 
     static lv_style_t labelStyle;
     lv_style_init(&labelStyle);
@@ -743,6 +753,28 @@ ESP_LOGI(TAG, "Free internal RAM: %zu", heap_caps_get_free_size(MALLOC_CAP_INTER
 
     //TEST GEAR CHANGE
     CreateAnimation(gear_label,gear_display_update_anim, 0, 7, true);
+}
+
+// Call on theme change — only updates sources and reflattens, no new objects
+void DrawDash_Update(const char *facePath, const char *midPath, const char *needlePath,
+                     lv_color_t face_tint, lv_opa_t face_tint_opa,
+                     lv_color_t mid_tint,  lv_opa_t mid_tint_opa, bool retint) {
+
+    // Update image sources on existing objects
+    lv_image_set_src(face_img,   &ram_background.dsc);
+    lv_image_set_src(mid_img,    &ram_middle.dsc);
+    lv_image_set_src(needle_img, &ram_needle.dsc);
+
+    // Reflatten with new tint — reuses existing canvas buffer
+    FlattenStaticLayers(face_tint, face_tint_opa, mid_tint, mid_tint_opa, retint);
+
+    // Bring needle and fuel image back to front
+    lv_obj_move_foreground(fuel_arc);
+    lv_obj_move_foreground(fuel_img);
+    lv_obj_move_foreground(needle_img);
+    lv_obj_move_foreground(speed_label);
+    lv_obj_move_foreground(gear_label);
+    lv_obj_move_foreground(unit_label);
 }
 
 
@@ -771,8 +803,8 @@ static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
     image_unload(&ram_background);
     image_unload(&ram_middle);
     image_unload(&ram_needle);
-    image_unload(&ram_hud);
-    image_unload(&ram_fuel);
+    //image_unload(&ram_hud);
+    //image_unload(&ram_fuel);
 
     // --- Load new face images ---
     if (image_load_from_sd(&ram_background, face->face_bin)   != ESP_OK ||
@@ -784,18 +816,18 @@ static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
         return;
     }
 
-    // Update LVGL image sources (already drawn objects, just change src)
-    lv_image_set_src(face_img,   &ram_background.dsc);
-    lv_image_set_src(mid_img,    &ram_middle.dsc);
-    lv_image_set_src(needle_img, &ram_needle.dsc);
+    // // Update LVGL image sources (already drawn objects, just change src)
+    // lv_image_set_src(face_img,   &ram_background.dsc);
+    // lv_image_set_src(mid_img,    &ram_middle.dsc);
+    // lv_image_set_src(needle_img, &ram_needle.dsc);
 
-    lv_anim_del(needle_img, set_angle); // Stop any existing needle animation
-    lv_anim_del(fuel_arc, set_fuel_level_anim); // Stop any existing fuel arc animation
-    lv_anim_del(gear_label, gear_display_update_anim); // Stop any existing gear label animation
-    lv_anim_del(speed_label, ui_set_speed); // Stop any existing speed label animation
+    //lv_anim_del(needle_img, set_angle); // Stop any existing needle animation
+    //lv_anim_del(fuel_arc, set_fuel_level_anim); // Stop any existing fuel arc animation
+    //lv_anim_del(gear_label, gear_display_update_anim); // Stop any existing gear label animation
+    //lv_anim_del(speed_label, ui_set_speed); // Stop any existing speed label animation
 
 
-    DrawDash(face->face_bin, face->mid_bin, face->needle_bin,
+    DrawDash_Update(face->face_bin, face->mid_bin, face->needle_bin,
               color->face_tint, color->face_tint_opa,
               color->mid_tint,  color->mid_tint_opa, color->retint
             );
@@ -847,7 +879,7 @@ void app_main(void)
         while (countTry < 1){
         if(CANSetup() == true)
         {
-        xTaskCreatePinnedToCore(ReceiveMessage, "TWAI_Recieve", 4096, NULL, RX_TASK_PRIO, &TWAI_Recieve_Task, tskNO_AFFINITY);
+        xTaskCreatePinnedToCore(ReceiveMessage, "TWAI_Recieve", 8192, NULL, RX_TASK_PRIO, &TWAI_Recieve_Task, 0); //PIN TO CORE 0 and increase stack size to 8192
         //xTaskCreatePinnedToCore(SendMessage, "TWAI_Send", 4096, NULL, RX_TASK_PRIO, NULL, tskNO_AFFINITY);
 
         break; 

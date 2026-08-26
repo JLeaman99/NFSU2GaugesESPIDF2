@@ -201,12 +201,19 @@ static lv_obj_t *build_step2(lv_obj_t *parent)
     lv_obj_set_size(cont, PANEL_W - 40, 340);
     lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cont, 0, 0);
-    lv_obj_set_style_pad_all(cont, 0, 0);
+    //lv_obj_set_style_pad_all(cont, 0, 0);
+        lv_obj_set_style_pad_top(cont, 10, 0);     // ← space for first row
+    lv_obj_set_style_pad_bottom(cont, 10, 0);  // ← space for last row
+    lv_obj_set_style_pad_left(cont, 0, 0);
+    lv_obj_set_style_pad_right(cont, 0, 0);
 
     lv_obj_set_scroll_dir(cont, LV_DIR_VER);          // vertical scroll only
     lv_obj_set_style_max_height(cont, 380, 0);         // cap height to panel space
     lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
-    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 60);
+    
+
+
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 70);
 
     // 3-column flex grid
     lv_obj_set_layout(cont, LV_LAYOUT_FLEX);
@@ -216,7 +223,7 @@ static lv_obj_t *build_step2(lv_obj_t *parent)
 
     for (int i = 0; i < (int)COLOR_COUNT; i++) {
         lv_obj_t *swatch = lv_obj_create(cont);
-        lv_obj_set_size(swatch, 120, 120);
+        lv_obj_set_size(swatch, 100, 100);
         lv_obj_set_scroll_dir(swatch, LV_DIR_NONE);
         lv_obj_set_style_radius(swatch, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(swatch, lv_color_hex(COLOR_FACE_HEX[i]), 0);
@@ -252,14 +259,18 @@ static lv_obj_t *build_step3(lv_obj_t *parent)
     lv_obj_set_size(cont, PANEL_W - 40, 340);
     lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cont, 0, 0);
-    lv_obj_set_style_pad_all(cont, 0, 0);
+    
+    lv_obj_set_style_pad_top(cont, 10, 0);     // ← space for first row
+    lv_obj_set_style_pad_bottom(cont, 10, 0);  // ← space for last row
+    lv_obj_set_style_pad_left(cont, 0, 0);
+    lv_obj_set_style_pad_right(cont, 0, 0);
     
     lv_obj_set_scroll_dir(cont, LV_DIR_VER);          // vertical scroll only
     lv_obj_set_style_max_height(cont, 380, 0);         // cap height to panel space
     lv_obj_set_scroll_snap_y(cont, LV_SCROLL_SNAP_NONE);
     
 
-    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, 70);
 
     // 3-column flex grid
     lv_obj_set_layout(cont, LV_LAYOUT_FLEX);
@@ -269,7 +280,7 @@ static lv_obj_t *build_step3(lv_obj_t *parent)
 
     for (int i = 0; i < (int)COLOR_COUNT; i++) {
         lv_obj_t *swatch = lv_obj_create(cont);
-        lv_obj_set_size(swatch, 120, 120);
+        lv_obj_set_size(swatch, 100, 100);
         lv_obj_set_scroll_dir(swatch, LV_DIR_NONE);
         lv_obj_set_style_radius(swatch, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_bg_color(swatch, lv_color_hex(COLOR_MID_HEX[i]), 0);
