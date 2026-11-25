@@ -5,5 +5,6 @@
     ],
     "idf.flashType": "UART",
     "C_Cpp.errorSquiggles": "enabled",
-    "idf.currentSetup": "C:\\Users\\jared\\esp\\v5.5.1\\esp-idf"
+    "idf.currentSetup": "C:\\Users\\jared\\esp\\v5.5.1\\esp-idf",
+    "idf.port": "COM5"
 }

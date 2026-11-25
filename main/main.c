@@ -30,6 +30,7 @@
 //#include "SD.h"
 
 //CAN imports
+#include "CAN.h"
 #include "driver/twai.h"
 //#include "esp_twai.h"
 #include "driver/gpio.h"
@@ -61,7 +62,7 @@ static const char hex[] = "0123456789ABCDEF";
 #define MOUNT_POINT "/sdcard"
 static const char *TAG = "example";
 static const char *LOG_TAG = "Drive_logger";
-
+/*
 typedef enum {
     GEAR_REVERSE = -1,
     GEAR_NEUTRAL =  0,
@@ -82,7 +83,7 @@ typedef struct {
 
 static VehicleDataRT vehicle_data = {0, 0, GEAR_NEUTRAL};
 static SemaphoreHandle_t vehicle_data_mutex = NULL;
-
+*/
 
 #pragma endregion
 
@@ -175,7 +176,7 @@ void touch_area_event_handler(lv_event_t *e)
 }
 
 #pragma endregion
-
+/*
 #pragma region CAN Setup
 bool InitialMessage(void){
     twai_message_t message;
@@ -365,7 +366,7 @@ vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 #pragma endregion
-
+*/
 #pragma region LVGL Filesystem Driver
 
 // ---- LVGL SD Filesystem Driver ----
@@ -918,8 +919,8 @@ void app_main(void)
         break; 
         }
         else{
-        ESP_LOGI(TAG,"Retrying CANBUS Initialization Count = %d", countTry);
-        countTry++;
+        ESP_LOGI(TAG,"Retrying CANBUS Initialization Count = %d", 0);
+        //countTry++;
         }
     
     }
