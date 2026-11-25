@@ -44,50 +44,23 @@
 //#include "HUD.h"
 #pragma endregion
 
-
-
+#pragma region Global Variables
 #define DEBUG_DASH 1
+#define CAN_LOGGING 1
 
+TaskHandle_t TWAI_Recieve_Task,TWAI_Send_Task;
+
+static const char hex[] = "0123456789ABCDEF";
 //CAN VARIABLES
-#define CAN_TX_GPIO (gpio_num_t)5
-#define CAN_RX_GPIO (gpio_num_t)4
+#define CAN_TX_GPIO (gpio_num_t)3
+#define CAN_RX_GPIO (gpio_num_t)2
 #define RX_TASK_PRIO            8
  int countTry = 0;
 
 //FS Driver
 #define MOUNT_POINT "/sdcard"
 static const char *TAG = "example";
-
-#pragma region Image Declare
-
-RamImage ram_background, ram_middle, ram_needle, ram_hud, ram_fuel;
-lv_obj_t *static_canvas = NULL;
-lv_obj_t *fuel_arc = NULL;
-
-// LV_IMG_DECLARE(FUELfull);
-// LV_IMG_DECLARE(face);
-// LV_IMG_DECLARE(mid);
-// LV_IMG_DECLARE(needle);
-//LV_IMG_DECLARE(HUD);
-
-// LV_FONT_DECLARE(helvetica_60);
-// LV_FONT_DECLARE(helvetica_B_I_70);
-#pragma endregion
-
-TaskHandle_t TWAI_Recieve_Task;
-
-lv_obj_t *face_img, *mid_img, *needle_img, *fuel_img, *hud_img;
-static lv_obj_t *speed_label, *unit_label, *gear_label;
-
-// Define colors manually
-#define LV_COLOR_RED lv_color_make(0xFF, 0x00, 0x00)
-#define LV_BACK_COLOR lv_color_make(0x1b,0x1b,0x1b)
-#define LV_COLOR_GREEN lv_color_make(0x00, 0xFF, 0x00)
-#define LV_COLOR_BLUE lv_color_make(0x00, 0x00, 0xFF)
-#define LV_COLOR_WHITE lv_color_make(0xFF, 0xFF, 0xFF)
-#define LV_COLOR_BLACK lv_color_make(0x00, 0x00, 0x00) // Define black color
-#define DEFAULTCOLOUR lv_color_hex(0x001122)
-
+static const char *LOG_TAG = "Drive_logger";
 
 typedef enum {
     GEAR_REVERSE = -1,
@@ -100,7 +73,62 @@ typedef enum {
     GEAR_6       =  6,
 } Gear;
 
+typedef struct {
+    uint16_t speed_kph;
+    uint16_t rpm;
+    Gear gear;
 
+} VehicleDataRT;
+
+static VehicleDataRT vehicle_data = {0, 0, GEAR_NEUTRAL};
+static SemaphoreHandle_t vehicle_data_mutex = NULL;
+
+
+#pragma endregion
+
+#pragma region Logging functions
+
+static int format_frame(char *buff, size_t buff_size, const twai_message_t *frame, int64_t timestamp) {
+    int n = snprintf(buff, buff_size, "%lld,0x%03X,%d,", timestamp, frame->identifier, frame->extd, frame->rtr, frame->data_length_code);
+
+    if (n<0 || (size_t)n >= buff_size) {
+        return -1; // Error or buffer too small
+    }
+
+    if(!frame->rtr)
+    {
+    for(int i=0; i< frame-> data_length_code && (size_t) frame + 3 < buff_size; i++)
+    {
+        buff[n++] = hex[(frame->data[i] >> 4)];
+        buff[n++] = hex[frame->data[i] & 0x0F];
+    }
+    }
+    buff[n++] = '\n';
+    buff[n] = '\0';
+    return n;
+}
+#pragma endregion
+
+#pragma region Image Declare
+
+RamImage ram_background, ram_middle, ram_needle, ram_hud, ram_fuel;
+lv_obj_t *static_canvas = NULL;
+lv_obj_t *fuel_arc = NULL;
+lv_obj_t *face_img, *mid_img, *needle_img, *fuel_img, *hud_img;
+static lv_obj_t *speed_label, *unit_label, *gear_label;
+
+// Define colors manually
+#define LV_COLOR_RED lv_color_make(0xFF, 0x00, 0x00)
+#define LV_BACK_COLOR lv_color_make(0x1b,0x1b,0x1b)
+#define LV_COLOR_GREEN lv_color_make(0x00, 0xFF, 0x00)
+#define LV_COLOR_BLUE lv_color_make(0x00, 0x00, 0xFF)
+#define LV_COLOR_WHITE lv_color_make(0xFF, 0xFF, 0xFF)
+#define LV_COLOR_BLACK lv_color_make(0x00, 0x00, 0x00) // Define black color
+#define DEFAULTCOLOUR lv_color_hex(0x001122)
+
+#pragma endregion
+
+#pragma region LVGL Helper Functions
 // Function to fill the screen with a specific color and clear previous content
 void fill_screen_with_color(lv_color_t color)
 {
@@ -111,29 +139,7 @@ void fill_screen_with_color(lv_color_t color)
 }
 
 const int AVERAGE_VALUES      = 10;
-/*
-int GetMovingAverage(int newValue){
-    static int values[AVERAGE_VALUES] = {0};
-    static int index = 0;
-    static int count = 0;
-    static double sum = 0;
 
-    // Subtract the value being replaced
-    sum -= values[index];
-
-    // Insert the new value
-    values[index] = newValue;
-    sum += newValue;
-
-    // Update index and count
-    index = (index + 1) % AVERAGE_VALUES;
-    if (count < AVERAGE_VALUES) count++;
-
-    float avg = sum / count;
-
-    return (int)roundf(avg * 10.0f);
-}
-*/
 // Function to handle touch input and draw black points on the screen
 void touch_event_handler(lv_event_t *e)
 {
@@ -168,29 +174,9 @@ void touch_area_event_handler(lv_event_t *e)
     }
 }
 
+#pragma endregion
 
-void demo_Waveshare(){
-// if (disp != NULL)
-    // {
-    //     bsp_display_rotate(disp, LV_DISPLAY_ROTATION_90); // 90、180、270
-    // }
-   
-
-    // Fill screen with red, green, and blue in sequence
-    fill_screen_with_color(LV_COLOR_RED);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1 second
-    fill_screen_with_color(LV_COLOR_GREEN);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1 second
-    fill_screen_with_color(LV_COLOR_BLUE);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Delay for 1 second
-
-    // Fill the screen with white after blue
-    fill_screen_with_color(LV_COLOR_WHITE);
-
-    lv_obj_t *label = lv_label_create(lv_scr_act());
-    lv_label_set_text(label, "Hello, World!");
-    lv_obj_center(label);
-}
+#pragma region CAN Setup
 bool InitialMessage(void){
     twai_message_t message;
 if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
@@ -203,8 +189,10 @@ if (twai_receive(&message, pdMS_TO_TICKS(3000)) == ESP_OK) {
 }
 
 bool CANSetup(void){
-    
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_4, TWAI_MODE_NORMAL); // Set to no-acknowledgment mode for testing
+    vehicle_data_mutex = xSemaphoreCreateMutex(); //Create a mutex for vehicle data access
+
+    //Serial.begin(115200);
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO, CAN_RX_GPIO, TWAI_MODE_NORMAL); // Set to no-acknowledgment mode for testing
     g_config.mode = TWAI_MODE_NORMAL; // Set to normal mode for standard operation
 
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS(); //Potentially TWAI_TIMING_CONFIG_500KBITS
@@ -220,9 +208,16 @@ bool CANSetup(void){
     //Start TWAI driver
     if (twai_start() == ESP_OK) {
         printf("Driver started\n");
-            return true;
     } else {
         printf("Failed to start driver\n");
+        return false;
+    }
+
+    uint32_t alerts_to_enable = TWAI_ALERT_RX_DATA |  TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR | TWAI_ALERT_BUS_OFF | TWAI_ALERT_TX_FAILED | TWAI_ALERT_RX_QUEUE_FULL| TWAI_ALERT_BUS_RECOVERED;
+     if (twai_reconfigure_alerts(alerts_to_enable, NULL) == ESP_OK) {
+        printf("Alerts configured\n");
+    } else {   
+        printf("Failed to configure alerts\n");
         return false;
     }
     // if(InitialMessage() == true){
@@ -233,46 +228,97 @@ bool CANSetup(void){
 }
 
 static void ReceiveMessage(void *arg){
+    int counter =0;
     while(1){
+        printf("Waiting for message...\n");
+ // Check if alert happened
+  uint32_t alerts_triggered;
+  twai_read_alerts(&alerts_triggered, pdMS_TO_TICKS(1000));
+  twai_status_info_t twaistatus;
+  twai_get_status_info(&twaistatus);
+
+  // Handle alerts
+  if (alerts_triggered & TWAI_ALERT_ERR_PASS) {
+   printf("Alert: TWAI controller has become error passive.");
+  }
+  if (alerts_triggered & TWAI_ALERT_BUS_ERROR) {
+    printf("Alert: A (Bit, Stuff, CRC, Form, ACK) error has occurred on the bus.");
+    printf("Bus error count: %" PRIu32 "\n", twaistatus.bus_error_count);
+  }
+  if (alerts_triggered & TWAI_ALERT_RX_QUEUE_FULL) {
+    printf("Alert: The RX queue is full causing a received frame to be lost.");
+    printf("RX buffered: %" PRIu32 "\t", twaistatus.msgs_to_rx);
+    printf("RX missed: %" PRIu32 "\t", twaistatus.rx_missed_count);
+    printf("RX overrun %" PRIu32 "\n", twaistatus.rx_overrun_count);
+  }    
+  if (alerts_triggered & TWAI_ALERT_BUS_OFF) {
+    printf("Alert: Bus-Off state, initiating recovery\n");
+    twai_initiate_recovery(); // Required before driver can transmit again
+}
+if (alerts_triggered & TWAI_ALERT_BUS_RECOVERED) {
+    printf("Alert: Bus has recovered, restarting driver\n");
+    twai_start(); // Must call twai_start() again after recovery completes
+}    
 //Wait for message to be received
 twai_message_t message;
-esp_err_t err = twai_receive(&message, pdMS_TO_TICKS(10000));
-
-if (err == ESP_OK) {
-    printf("Message received\n");
-    
-} else if(err == ESP_ERR_TIMEOUT) {
-    printf("Message Timeout\n");
-    continue; // Skip processing if no message is received
-    }
-     else if(err == ESP_ERR_INVALID_ARG) {
-    printf("Invalid argument\n");
-    continue; // Skip processing if no message is received
-    }
-     else if(err == ESP_ERR_INVALID_STATE) {
-    printf("Invalid state\n");
-    continue; // Skip processing if no message is received
-    }
-     else if(err == ESP_FAIL) {
-    printf("Failed to receive message\n");
-    continue; // Skip processing if no message is received
-    }
-
-
-
+while(twai_receive(&message,0) == ESP_OK){
 //Process received message
 if (message.extd) {
     printf("Message is in Extended Format\n");
 } else {
     printf("Message is in Standard Format\n");
 }
+printf("Message Number: %d\n", counter++);
 printf("ID is %d\n", message.identifier);
 if (!(message.rtr)) {
     printf("DLC = %d\n",message.data_length_code);
     for (int i = 0; i < message.data_length_code; i++) {
         printf("Data byte %d = %d\n", i, message.data[i]);
+        }
     }
+
+    // if (message.identifier == 0xAAAA) {
+    //     if (vehicle_data_mutex != NULL) {
+    //         if (xSemaphoreTake(vehicle_data_mutex, pdMS_TO_TICKS(100))) {
+    //             vehicle_data.speed_kph = message.data[0];
+    //             vehicle_data.rpm = message.data[1] << 8 | message.data[2];
+    //             vehicle_data.gear = (Gear)message.data[3];
+    //             xSemaphoreGive(vehicle_data_mutex);
+    //         } else {
+    //             printf("Failed to take mutex for vehicle data update\n");
+    //         }
+    //     } else {
+    //         printf("Vehicle data mutex is NULL\n");
+    //     }
+    // }
+
+    
 }
+// esp_err_t err = twai_receive(&message,0);
+
+// if (err == ESP_OK) {
+//     printf("Message received\n");
+    
+// } else if(err == ESP_ERR_TIMEOUT) {
+//     printf("Message Timeout\n");
+//     continue; // Skip processing if no message is received
+//     }
+//      else if(err == ESP_ERR_INVALID_ARG) {
+//     printf("Invalid argument\n");
+//     continue; // Skip processing if no message is received
+//     }
+//      else if(err == ESP_ERR_INVALID_STATE) {
+//     printf("Invalid state\n");
+//     continue; // Skip processing if no message is received
+//     }
+//      else if(err == ESP_FAIL) {
+//     printf("Failed to receive message\n");
+//     continue; // Skip processing if no message is received
+//     }
+
+
+
+
 }
 }
 
@@ -292,10 +338,10 @@ message.identifier = 0xAAAA;
 message.extd = 1;
 message.data_length_code = 4;
 for (int i = 0; i < 4; i++) {
-    message.data[i] = 0;
+    message.data[i] = i;
 }
 
-esp_err_t err = twai_transmit(&message, pdMS_TO_TICKS(3000));
+esp_err_t err = twai_transmit(&message, pdMS_TO_TICKS(100));
 //Queue message for transmission
 if (err == ESP_OK) {
     printf("Message queued for transmission\n");
@@ -308,9 +354,19 @@ else if (err == ESP_ERR_INVALID_ARG) {
 else if (err == ESP_FAIL) {
     printf("Driver not installed or stopped\n");
 }
+else if (err == ESP_ERR_INVALID_STATE) {
+    printf("Driver not started or bus-off\n");
+    twai_initiate_recovery(); // Required before driver can transmit again
 }
+vTaskDelay(pdMS_TO_TICKS(100));
+
 }
 
+}
+
+#pragma endregion
+
+#pragma region LVGL Filesystem Driver
 
 // ---- LVGL SD Filesystem Driver ----
 static void *lvgl_fs_open(lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode) {
@@ -374,7 +430,9 @@ void lvgl_sd_fs_init(void) {
     ESP_LOGI(TAG, "LVGL SD filesystem driver registered");
 }
 
+#pragma endregion
 
+#pragma region Setup
 void Setup(void){
     bsp_display_cfg_t cfg = {
         .lvgl_port_cfg = ESP_LVGL_PORT_INIT_CONFIG(),
@@ -453,8 +511,11 @@ void Setup(void){
 
     lvgl_sd_fs_init();
     
+        
 }
+#pragma endregion
 
+#pragma region Animations and Updates
 static void gear_display_update(lv_obj_t *label, Gear gear) {
     switch (gear) {
         case GEAR_REVERSE: lv_label_set_text(label, "R"); break;
@@ -553,6 +614,19 @@ static void CreateAnimation(void * img, lv_anim_exec_xcb_t change, int32_t start
     lv_anim_start(&anim);
 }
 
+void run_anim(){
+    lv_anim_t anim; 
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, &needle_img);
+    lv_anim_set_exec_cb(&anim, set_angle);
+    lv_anim_set_values(&anim, 0, 3600);
+    lv_anim_set_duration(&anim, 5000);
+    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_start(&anim);
+}
+#pragma endregion
+
+#pragma region Draw Functions
 static void DrawImage(lv_obj_t ** img, const void *imgSrc){
     *img = lv_image_create(lv_scr_act());
       if (lv_image_src_get_type(imgSrc) == LV_IMAGE_SRC_FILE) {
@@ -777,21 +851,9 @@ void DrawDash_Update(const char *facePath, const char *midPath, const char *need
     lv_obj_move_foreground(unit_label);
 }
 
+#pragma endregion
 
-
-
-void run_anim(){
-    lv_anim_t anim; 
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, &needle_img);
-    lv_anim_set_exec_cb(&anim, set_angle);
-    lv_anim_set_values(&anim, 0, 3600);
-    lv_anim_set_duration(&anim, 5000);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_start(&anim);
-}
-
-
+#pragma region Menu Callback
 
 static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
 {
@@ -816,25 +878,12 @@ static void on_menu_apply(const GaugeFace *face, const ThemeColor *color)
         return;
     }
 
-    // // Update LVGL image sources (already drawn objects, just change src)
-    // lv_image_set_src(face_img,   &ram_background.dsc);
-    // lv_image_set_src(mid_img,    &ram_middle.dsc);
-    // lv_image_set_src(needle_img, &ram_needle.dsc);
-
-    //lv_anim_del(needle_img, set_angle); // Stop any existing needle animation
-    //lv_anim_del(fuel_arc, set_fuel_level_anim); // Stop any existing fuel arc animation
-    //lv_anim_del(gear_label, gear_display_update_anim); // Stop any existing gear label animation
-    //lv_anim_del(speed_label, ui_set_speed); // Stop any existing speed label animation
-
 
     DrawDash_Update(face->face_bin, face->mid_bin, face->needle_bin,
               color->face_tint, color->face_tint_opa,
               color->mid_tint,  color->mid_tint_opa, color->retint
             );
-    // FlattenStaticLayers(color->face_tint, color->face_tint_opa,
-    //                     color->mid_tint,  color->mid_tint_opa);
-    // // Re-flatten static layers with new tint
-    //FlattenStaticLayers(color->face_tint, color->face_tint_opa,color->mid_tint,  color->mid_tint_opa);
+
 
     bsp_display_unlock();
     vTaskResume(TWAI_Recieve_Task);
@@ -846,28 +895,12 @@ static void dash_longpress_cb(lv_event_t *e)
     menu_show();
 }
 
+#pragma endregion
 
 void app_main(void)
 {
     Setup();
   
-
-
-
-    //fill_screen_with_color(LV_COLOR_WHITE);
-    /*
-    // Leave Touch Area here for now so that I have event handler ready
-    // Create an enlarged touch area to capture all touch events
-    lv_obj_t *touch_area = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(touch_area, 840, 1320); // Set size larger than the screen (adjust as needed)
-    lv_obj_align(touch_area, LV_ALIGN_CENTER, 0, 0); // Center it on the screen
-
-    // Make the touch area invisible but still capture touch events
-    lv_obj_set_style_bg_opa(touch_area, LV_OPA_TRANSP, LV_PART_MAIN); // Make it transparent
-
-    // Register the touch area event handler
-    lv_obj_add_event_cb(touch_area, touch_area_event_handler, LV_EVENT_ALL, NULL);
-    */
     bsp_display_lock(0);
     //DrawTest();
     menu_init(on_menu_apply);  // make sure this line exists and on_menu_apply is not NULL
@@ -891,13 +924,33 @@ void app_main(void)
     
     }
 
+    //NOTES: ALL GNDs must be in same Ground PLANE, both sender and receiver. CAN_H and CAN_L are 1.67V idle. Ensure VP230 connected to 3V3 and GND. TX to GPIO 3 and RX to GPIO 2.
     
     while (true)
     {
         // Let LVGL handle rendering and input
         //vTaskDelay(portMAX_DELAY);
         //lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(500));
+
+    //     VehicleDataRT local_copy;
+    // bool got_update = false;
+
+    // if (xSemaphoreTake(vehicle_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    //     local_copy = vehicle_data;
+    //     xSemaphoreGive(vehicle_data_mutex);
+    //     got_update = true;
+    // }
+
+    // if (got_update) {
+    //     bsp_display_lock(0);
+    //     lv_label_set_text_fmt(speed_label, "%03d", local_copy.speed_kph);
+    //     gear_display_update(gear_label, local_copy.gear);
+    //     // Calibrate min/max angle to your actual needle pivot/sweep once you know real RPM range
+    //     int32_t needle_angle = lv_map(local_copy.rpm, 0, 8000, 0, 2400);
+    //     lv_image_set_rotation(needle_img, needle_angle);
+    //     bsp_display_unlock();
+    // }    
+        vTaskDelay(pdMS_TO_TICKS(100));
        //printf("TEST");
         //lv_task_handler(); // Call LVGL's task handler periodically
 
